@@ -14,7 +14,6 @@ pub fn build(b: *std.build.Builder) void {
     });
     pure_c.force_pic = true;
     pure_c.addCSourceFiles(&.{"c-impl/pure.c"}, &.{"-std=c89"});
-    //pure_c.addIncludePath(.{ .path = "zlib" });
     pure_c.linkLibrary(libz);
     b.installArtifact(pure_c);
 
@@ -25,6 +24,16 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = optimize,
     });
     b.installArtifact(pure);
+
+    const unit_tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/test.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
 
     const exe = b.addExecutable(.{
         .name = "pure",
