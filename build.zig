@@ -4,32 +4,8 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zlib = b.addStaticLibrary(.{
-        .name = "zlib",
-        .target = target,
-        .optimize = optimize,
-    });
-    zlib.linkLibC();
-    zlib.force_pic = true;
-    zlib.addCSourceFiles(&.{
-        "zlib/adler32.c",
-        "zlib/compress.c",
-        "zlib/crc32.c",
-        "zlib/deflate.c",
-        "zlib/gzclose.c",
-        "zlib/gzlib.c",
-        "zlib/gzread.c",
-        "zlib/gzwrite.c",
-        "zlib/inflate.c",
-        "zlib/infback.c",
-        "zlib/inftrees.c",
-        "zlib/inffast.c",
-        "zlib/trees.c",
-        "zlib/uncompr.c",
-        "zlib/zutil.c",
-    }, &.{
-        "-std=c89",
-    });
+    const zlib = b.dependency("zlib", .{ .target = target, .optimize = optimize });
+    const libz = zlib.artifact("z");
 
     const pure_c = b.addStaticLibrary(.{
         .name = "purec",
@@ -38,8 +14,8 @@ pub fn build(b: *std.build.Builder) void {
     });
     pure_c.force_pic = true;
     pure_c.addCSourceFiles(&.{"c-impl/pure.c"}, &.{"-std=c89"});
-    pure_c.addIncludePath(.{ .path = "zlib" });
-    pure_c.linkLibrary(zlib);
+    //pure_c.addIncludePath(.{ .path = "zlib" });
+    pure_c.linkLibrary(libz);
     b.installArtifact(pure_c);
 
     const pure = b.addStaticLibrary(.{
@@ -56,7 +32,7 @@ pub fn build(b: *std.build.Builder) void {
         .target = target,
         .optimize = optimize,
     });
-    exe.linkLibrary(zlib);
+    exe.linkLibrary(libz);
     exe.linkLibrary(pure_c);
     b.installArtifact(exe);
 
