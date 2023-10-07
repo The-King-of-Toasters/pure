@@ -778,10 +778,10 @@ fn verifyString(
         if (c == 0) return error.StringNullByte;
 
     if (utf8) {
-        // TODO: Verify that UTF-8 encoding is valid:
-        // Some systems such as macOS never bother to set bit 11 to indicate UTF-8.
-        // We therefore always attempt UTF-8 and fallback to CP437 only on error.
-        // If the string must be UTF-8 then reject the string as invalid.
+        // TODO(joran): Verify that UTF-8 encoding is valid:
+        //  Some systems such as macOS never bother to set bit 11 to indicate UTF-8.
+        //  We therefore always attempt UTF-8 and fallback to CP437 only on error.
+        //  If the string must be UTF-8 then reject the string as invalid.
     }
 }
 
@@ -1424,8 +1424,9 @@ fn locateEocdr(buffer: []const u8) errors!u64 {
 fn locateFirstLfh(buffer: []const u8, eocdr: *const Eocdr) errors!u64 {
     assert(buffer.len >= 8);
     // We expect a Local File Header or End Of Central Directory Record signature:
-    // TODO: Test empty file OK.
-    // TODO: Test non-empty file OK.
+    // TODO(joran):
+    //  - Test empty file OK.
+    //  - Test non-empty file OK.
     const string = if (eocdr.cd_records > 0)
         Lfh.signature
     else
@@ -1521,7 +1522,8 @@ fn verifyData(
     if (crc.hash(raw[0..cdh.uncompressed_size]) != cdh.crc32)
         return error.Crc32;
 
-    // TODO: Check for common ZIP extensions in addition to PK signature.
+    // TODO(joran):
+    //  Check for common ZIP extensions in addition to PK signature.
     if (mem.startsWith(u8, raw, "PK")) {
         try zipMetadata(ctx, raw[0..cdh.uncompressed_size]);
     } else {
