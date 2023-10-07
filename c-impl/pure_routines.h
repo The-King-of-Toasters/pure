@@ -102,24 +102,27 @@ int pure_search(
   return PURE_E_STRING_NOT_FOUND;
 }
 
+// See: https://justine.lol/endian.html
+#define READ16LE(S) ((255 & (S)[1]) << 8 | (255 & (S)[0]))
+#define READ32LE(S)                                                    \
+  ((uint32_t)(255 & (S)[3]) << 030 | (uint32_t)(255 & (S)[2]) << 020 | \
+   (uint32_t)(255 & (S)[1]) << 010 | (uint32_t)(255 & (S)[0]) << 000)
+#define READ64LE(S)                                                    \
+  ((uint64_t)(255 & (S)[7]) << 070 | (uint64_t)(255 & (S)[6]) << 060 | \
+   (uint64_t)(255 & (S)[5]) << 050 | (uint64_t)(255 & (S)[4]) << 040 | \
+   (uint64_t)(255 & (S)[3]) << 030 | (uint64_t)(255 & (S)[2]) << 020 | \
+   (uint64_t)(255 & (S)[1]) << 010 | (uint64_t)(255 & (S)[0]) << 000)
+
 uint16_t pure_u16(const uint8_t* buffer) {
-  const uint8_t a = buffer[0];
-  const uint8_t b = buffer[1];
-  return (a << 0) | (b << 8);
+	return READ16LE(buffer);
 }
 
 uint32_t pure_u32(const uint8_t* buffer) {
-  const uint8_t a = buffer[0];
-  const uint8_t b = buffer[1];
-  const uint8_t c = buffer[2];
-  const uint8_t d = buffer[3];
-  return (a << 0) | (b << 8) | (c << 16) | (d << 24);
+	return READ32LE(buffer);
 }
 
 uint64_t pure_u64(const uint8_t* buffer) {
-  const uint32_t a = pure_u32(buffer + 0);
-  const uint32_t b = pure_u32(buffer + 4);
-  return ((uint64_t) b << 32) + a;
+	return READ64LE(buffer);
 }
 
 int pure_zeroes(
