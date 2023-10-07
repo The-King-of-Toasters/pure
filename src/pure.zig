@@ -769,10 +769,7 @@ fn verifyFlags(bits: GeneralPurposeBits) errors!void {
     if (bits.bit15_reserved) return error.FlagReservedBit15;
 }
 
-fn verifyString(
-    string: []const u8,
-    utf8: bool,
-) errors!void {
+fn verifyString(string: []const u8, utf8: bool) errors!void {
     if (string.len > zip_string_max) return error.StringMax;
     for (string) |c|
         if (c == 0) return error.StringNullByte;
@@ -885,11 +882,7 @@ fn decodeEief64(
 }
 
 // Compare LFH against CDH taking Data Descriptor Record into account:
-fn diffCld(
-    cdh_value: u64,
-    lfh_value: u64,
-    lfh: Lfh,
-) bool {
+fn diffCld(cdh_value: u64, lfh_value: u64, lfh: Lfh) bool {
     // LFH matches CDH:
     if (lfh_value == cdh_value)
         return false;
@@ -933,11 +926,7 @@ fn diffCdhAndLfh(cdh: Cdh, lfh: Lfh) errors!void {
         return error.DiffLfhFileName;
 }
 
-fn decodeLfh(
-    buffer: []const u8,
-    offset: u64,
-    header: *Lfh,
-) errors!void {
+fn decodeLfh(buffer: []const u8, offset: u64, header: *Lfh) errors!void {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     var fbs = std.io.fixedBufferStream(buf);
@@ -1007,11 +996,7 @@ fn decodeLfh(
     );
 }
 
-fn decodeDdr(
-    buffer: []const u8,
-    offset: u64,
-    header: *Ddr,
-) errors!void {
+fn decodeDdr(buffer: []const u8, offset: u64, header: *Ddr) errors!void {
     assert(offset < buffer.len);
     var min: u64 = zip_ddr_min;
     if (header.zip64) min = zip_ddr_64_min;
@@ -1358,50 +1343,6 @@ fn inflateRaw(ctx: *const Ctx, compressed: []const u8, uncompressed: []u8) error
     };
 }
 
-// Translated zlib impl for reference.
-//const zlib = @cImport({
-//    @cInclude("zlib.h");
-//});
-//
-//fn inflateRaw(
-//    compressed: []const u8,
-//    uncompressed: []u8,
-//) errors!void {
-//    if (uncompressed.len == 0) return;
-//    var z = mem.zeroes(zlib.z_stream);
-//    // We indicate raw inflate to zlib by setting window_bits to negative:
-//    // We further allow for the greatest possible compression window size (15).
-//    if (zlib.inflateInit2(&z, -15) != zlib.Z_OK) return error.Inflate;
-//
-//    // TO DO: Switch to streaming zlib inflate to support larger file sizes.
-//    z.avail_in = @intCast(u32, compressed.len);
-//    z.avail_out = @intCast(u32, uncompressed.len);
-//    z.next_in = @intToPtr([*c]u8, @ptrToInt(compressed.ptr));
-//    z.next_out = uncompressed.ptr;
-//
-//    var zerr = zlib.inflate(&z, zlib.Z_FINISH);
-//    _ = zlib.inflateEnd(&z);
-//    switch (zerr) {
-//        zlib.Z_NEED_DICT => return error.InflateDictionary,
-//        zlib.Z_DATA_ERROR => return error.InflateData,
-//        zlib.Z_STREAM_ERROR => return error.InflateStream,
-//        zlib.Z_MEM_ERROR => return error.InflateMemory,
-//        zlib.Z_BUF_ERROR => {
-//            // If avail_out and avail_in are both zero then it is likely an output
-//            // overflow since the input stream has more chance of terminating first.
-//            // We therefore check avail_out first since we cannot further distinguish.
-//            if (z.avail_out == 0) return error.BombInflateUncompressedOverflow;
-//            if (z.avail_in == 0) return error.BombInflateCompressedOverflow;
-//        },
-//        else => {},
-//    }
-//
-//    if (z.avail_in > 0) return error.InflateCompressedUnderflow;
-//    if (z.avail_out > 0) return error.InflateUncompressedUnderflow;
-//    assert(z.total_in == compressed.len);
-//    assert(z.total_out == uncompressed.len);
-//}
-
 fn locateEocdr(buffer: []const u8) errors!u64 {
     if (buffer.len < zip_eocdr_min) return error.TooSmall;
     var index = @as(i64, @bitCast(buffer.len)) - zip_eocdr_min;
@@ -1436,20 +1377,21 @@ fn locateFirstLfh(buffer: []const u8, eocdr: *const Eocdr) errors!u64 {
 
     // A spanned/split archive may be preceded by a special spanning signature:
     // See APPNOTE 8.5.3 and 8.5.4.
-    // TODO:
-    // - Test spanned file OK (empty, non-empty).
-    // - Test split file OK (empty, non-empty).
+    // TODO(joran):
+    //  - Test spanned file OK (empty, non-empty).
+    //  - Test split file OK (empty, non-empty).
     if (mem.startsWith(u8, buffer, span_signature) or
         mem.startsWith(u8, buffer, s_zip_temp))
         if (mem.startsWith(u8, buffer[span_signature.len..], string))
             return span_signature.len;
 
     const search_limit = @min(buffer.len, 1024);
-    if (mem.indexOf(u8, buffer[0..search_limit], string)) |prepended_data|
+    if (mem.indexOf(u8, buffer[0..search_limit], string)) |prepended_data| {
         return if (zeroes(buffer[0..prepended_data]))
             error.PrependedDataZeroed
         else
             error.PrependedDataBufferBleed;
+    }
 
     // We could not find any end to the prepended data:
     return error.PrependedData;
@@ -1535,11 +1477,11 @@ fn verifyData(
 fn zipMeta(ctx: *Ctx, buffer: []const u8, data: *[]u8) errors!void {
     // Update and check context against limits:
     ctx.depth += 1;
-    if ((ctx.depth) > depth_max) return error.BombDepth;
+    if (ctx.depth > depth_max) return error.BombDepth;
     ctx.files += 1;
-    if ((ctx.files) > files_max) return error.BombFiles;
+    if (ctx.files > files_max) return error.BombFiles;
     ctx.archives += 1;
-    if ((ctx.archives) > archives_max) return error.BombArchives;
+    if (ctx.archives > archives_max) return error.BombArchives;
     ctx.size = try math.add(u64, ctx.size, buffer.len);
     if (ctx.size > size_max) return error.SizeMax;
 
@@ -1659,10 +1601,7 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8, data: *[]u8) errors!void {
     ctx.depth -= 1;
 }
 
-fn zipMetadata(
-    ctx: *Ctx,
-    buffer: []const u8,
-) errors!void {
+fn zipMetadata(ctx: *Ctx, buffer: []const u8) errors!void {
     // TODO(stephen): Fix the memory leak I reinroduced.
     var data = mem.zeroes([]u8);
     try zipMeta(ctx, buffer, &data);
