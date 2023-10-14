@@ -348,28 +348,24 @@ pub extern fn pure_zip(buffer: [*c]const u8, size: u64, flags: u64) E;
 pub fn main() !void {
     var buf_out = std.io.bufferedWriter(std.io.getStdOut().writer());
     const writer = buf_out.writer();
-    //    var gpa = std.heap.GeneralPurposeAllocator(.{
-    //        .retain_metadata = true,
-    //        .verbose_log = true,
-    //    }){};
-    //    defer _ = gpa.deinit();
-    //    const allocator = gpa.allocator();
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{
+        // .retain_metadata = true,
+        // .verbose_log = true,
+    }){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    var args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    if (args.len < 2) return error.NoArgs;
-
+    var arg_iterator = try std.process.argsWithAllocator(allocator);
+    defer arg_iterator.deinit();
+    std.debug.assert(arg_iterator.skip()); // program name
+    var next_arg: ?[]const u8 = arg_iterator.next() orelse return error.NoArgs;
     var check_error = false;
-    if (std.mem.eql(u8, args[1], "-c")) {
+    if (std.mem.eql(u8, next_arg.?, "-c")) {
         check_error = true;
-        args = args[2..];
-        if (args.len == 0) return error.NoArgs;
+        next_arg = arg_iterator.next() orelse return error.NoArgs;
     }
 
-    for (args) |arg| {
+    while (next_arg) |arg| : (next_arg = arg_iterator.next()) {
         var file = try std.fs.cwd().openFile(arg, .{});
         defer file.close();
         const zip = try file.readToEndAlloc(allocator, std.math.maxInt(u32));
