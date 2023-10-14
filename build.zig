@@ -13,7 +13,7 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = optimize,
     });
     pure_c.force_pic = true;
-    pure_c.addCSourceFiles(&.{"c-impl/pure.c"}, &.{"-std=c89"});
+    pure_c.addCSourceFile(.{ .file = .{ .path = "c-impl/pure.c" }, .flags = &[_][]const u8{"-std=c89"} });
     pure_c.linkLibrary(libz);
     b.installArtifact(pure_c);
 
