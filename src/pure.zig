@@ -1409,12 +1409,22 @@ fn diffDdrLfh(ddr: *const Ddr, lfh: *const Lfh) errors!void {
         return error.DiffLfhDdrUncompressedSize;
 }
 
+// Data which is optionally freed in deinit. Useful when a piece of data may be _either_ part of a larger buffer or not.
+// and you only know which at runtime
+const MaybeOwned = struct {
+    owned: bool = false,
+    data: []const u8,
+
+    pub fn deinit(self: *MaybeOwned, allocator: std.mem.Allocator) void {
+        if (self.owned) allocator.free(self.data);
+    }
+};
+
 fn verifyData(
     ctx: *Ctx,
     buffer: []const u8,
     cdh: *Cdh,
     lfh: *Lfh,
-    data: *[]u8,
 ) errors!void {
     if (cdh.directory) {
         assert(cdh.compressed_size == 0);
@@ -1445,20 +1455,28 @@ fn verifyData(
         ctx.compressed_size,
         ctx.uncompressed_size,
     );
-    var raw: []const u8 = undefined;
+    var raw_wrapper: MaybeOwned = .{ .data = "" };
+    defer raw_wrapper.deinit(ctx.allocator);
     if (cdh.compression_method == .deflate) {
-        data.* = try ctx.allocator.alloc(u8, cdh.uncompressed_size);
-
+        var data = try ctx.allocator.alloc(u8, cdh.uncompressed_size);
+        errdefer ctx.allocator.free(data);
         try inflateRaw(
             ctx,
             buffer[cdh.relative_offset + lfh.length ..][0..cdh.compressed_size],
-            data.*,
+            data,
         );
-        raw = data.*;
+        raw_wrapper = .{
+            .data = data,
+            .owned = true,
+        };
     } else {
         assert(cdh.compression_method == .uncompressed);
-        raw = buffer[cdh.relative_offset + lfh.length ..];
+        raw_wrapper = .{
+            .data = buffer[cdh.relative_offset + lfh.length ..],
+            .owned = false,
+        };
     }
+    var raw: []const u8 = raw_wrapper.data;
     assert(raw.len > 0);
 
     if (crc.hash(raw[0..cdh.uncompressed_size]) != cdh.crc32)
@@ -1467,14 +1485,14 @@ fn verifyData(
     // TODO(joran):
     //  Check for common ZIP extensions in addition to PK signature.
     if (mem.startsWith(u8, raw, "PK")) {
-        try zipMetadata(ctx, raw[0..cdh.uncompressed_size]);
+        try zipMeta(ctx, raw[0..cdh.uncompressed_size]);
     } else {
         ctx.files += 1;
         if (ctx.files > files_max) return error.BombFiles;
     }
 }
 
-fn zipMeta(ctx: *Ctx, buffer: []const u8, data: *[]u8) errors!void {
+fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
     // Update and check context against limits:
     ctx.depth += 1;
     if (ctx.depth > depth_max) return error.BombDepth;
@@ -1555,7 +1573,7 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8, data: *[]u8) errors!void {
         // We descend into the data only after checking for LFH overlap above:
         // We can therefore descend only after decoding at least two entries.
         if (cdh_record > 0)
-            try verifyData(ctx, buffer, &cdh_p, &lfh_p, data);
+            try verifyData(ctx, buffer, &cdh_p, &lfh_p);
 
         // Shallow copy the CDH and LFH to descend next time around the loop:
         cdh_p = cdh;
@@ -1567,7 +1585,7 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8, data: *[]u8) errors!void {
 
     // Descend into the previous CDH and LFH:
     if (cdh_record > 0)
-        try verifyData(ctx, buffer, &cdh_p, &lfh_p, data);
+        try verifyData(ctx, buffer, &cdh_p, &lfh_p);
     if (lfh_offset > eocdr.cd_offset) return error.LfOverflow;
     if (lfh_offset < eocdr.cd_offset) {
         assert(eocdr.cd_offset <= buffer.len);
@@ -1601,13 +1619,6 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8, data: *[]u8) errors!void {
     ctx.depth -= 1;
 }
 
-fn zipMetadata(ctx: *Ctx, buffer: []const u8) errors!void {
-    // TODO(stephen): Fix the memory leak I reinroduced.
-    var data = mem.zeroes([]u8);
-    try zipMeta(ctx, buffer, &data);
-    ctx.allocator.free(data);
-}
-
 pub fn zip(buffer: []const u8, allocator: mem.Allocator) errors!void {
     // SPEC: https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
 
@@ -1623,5 +1634,5 @@ pub fn zip(buffer: []const u8, allocator: mem.Allocator) errors!void {
     // * `version needed to extract` to be at most 45 (too many false positives)
     // * bit 11 (UTF-8) when a string byte exceeds 0x7F (this could also be CP437)
     var ctx = Ctx{ .allocator = allocator };
-    return zipMetadata(&ctx, buffer);
+    return zipMeta(&ctx, buffer);
 }
