@@ -1,5 +1,46 @@
 const std = @import("std");
 const pure = @import("pure.zig");
+const regress = @import("regress");
+
+// Runs a regression test of C version of pure against Zig version
+// Using libzip regression testing set.
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{
+        // .enable_memory_limit = true,
+        // .never_unmap = true,
+        // .retain_metadata = true,
+    }){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var dir = try std.fs.openIterableDirAbsolute(regress.regression_zip_dir, .{});
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var count: usize = 0;
+    while (try walker.next()) |entry| {
+        if (std.mem.endsWith(u8, entry.basename, ".zip")) {
+            var zip = try open_mmap(entry.dir, entry.path);
+            defer std.os.munmap(zip);
+            var ret_zig: convertedErrors = error.ok;
+            pure.zip(zip, allocator) catch |err| {
+                ret_zig = err;
+            };
+            const ret_c = pure_zip(zip.ptr, zip.len, 0);
+            if (ret_zig != convertError(ret_c))
+                std.log.err("{s}: {} instead of {}\n", .{ entry.path, ret_zig, ret_c });
+            count += 1;
+        }
+    }
+    std.log.info("checked {} zips", .{count});
+}
+
+// Result must be closed with std.os.munmap
+fn open_mmap(dir: std.fs.Dir, file_path: []const u8) ![]align(std.mem.page_size) u8 {
+    var f = try dir.openFile(file_path, .{ .mode = .read_only });
+    defer f.close();
+    const stat = try f.stat();
+    return try std.os.mmap(null, stat.size, std.os.PROT.READ, std.os.MAP.PRIVATE, f.handle, 0);
+}
 
 pub const E = enum(c_int) {
     OK,
@@ -344,52 +385,3 @@ fn convertError(e: E) convertedErrors {
 }
 
 pub extern fn pure_zip(buffer: [*c]const u8, size: u64, flags: u64) E;
-
-pub fn main() !void {
-    var buf_out = std.io.bufferedWriter(std.io.getStdOut().writer());
-    const writer = buf_out.writer();
-    var gpa = std.heap.GeneralPurposeAllocator(.{
-        // .retain_metadata = true,
-        // .verbose_log = true,
-    }){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var arg_iterator = try std.process.argsWithAllocator(allocator);
-    defer arg_iterator.deinit();
-    std.debug.assert(arg_iterator.skip()); // program name
-    var next_arg: ?[]const u8 = arg_iterator.next() orelse return error.NoArgs;
-    var check_error = false;
-    if (std.mem.eql(u8, next_arg.?, "-c")) {
-        check_error = true;
-        next_arg = arg_iterator.next() orelse return error.NoArgs;
-    }
-
-    while (next_arg) |arg| : (next_arg = arg_iterator.next()) {
-        var zip = try open_mmap(arg);
-        defer std.os.munmap(zip);
-
-        var ret_zig: convertedErrors = error.ok;
-        pure.zip(zip, allocator) catch |err| {
-            ret_zig = err;
-        };
-
-        if (check_error) {
-            const ret_c = pure_zip(zip.ptr, zip.len, 0);
-            if (ret_zig != convertError(ret_c))
-                try writer.print("{s}: {} instead of {}\n", .{ arg, ret_zig, ret_c });
-        } else {
-            try writer.print("{s} - {}\n", .{ arg, ret_zig });
-        }
-    }
-
-    try buf_out.flush();
-}
-
-// Result must be closed with std.os.munmap
-fn open_mmap(file_path: []const u8) ![]align(std.mem.page_size) u8 {
-    var f = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
-    defer f.close();
-    const stat = try f.stat();
-    return try std.os.mmap(null, stat.size, std.os.PROT.READ, std.os.MAP.PRIVATE, f.handle, 0);
-}
