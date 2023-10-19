@@ -397,7 +397,7 @@ const Eocdr = struct {
     cd_records: u64,
     cd_size: u64,
     cd_offset: u64,
-    comment: [*c]const u8,
+    comment: []const u8,
     comment_length: u64,
     zip64: bool,
 };
@@ -926,7 +926,7 @@ fn diffCdhAndLfh(cdh: Cdh, lfh: Lfh) errors!void {
         return error.DiffLfhFileName;
 }
 
-fn decodeLfh(buffer: []const u8, offset: u64, header: *Lfh) errors!void {
+fn decodeLfh(buffer: []const u8, offset: u64) errors!Lfh {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     var fbs = std.io.fixedBufferStream(buf);
@@ -939,16 +939,22 @@ fn decodeLfh(buffer: []const u8, offset: u64, header: *Lfh) errors!void {
     if (lfh.sig != LocalFileHeader.signature)
         return error.LfhSignature;
 
-    header.offset = offset;
-    header.version_minimum = lfh.version_made;
-    header.gp_bits = lfh.gp_bits;
-    header.compression_method = lfh.compression_method;
-    header.last_mod_file_time = lfh.last_mod_file_time;
-    header.last_mod_file_date = lfh.last_mod_file_date;
-    header.crc32 = lfh.crc32;
-    header.compressed_size = lfh.compressed_size;
-    header.uncompressed_size = lfh.uncompressed_size;
-    header.length = zip_lfh_min;
+    var header = Lfh{
+        .offset = offset,
+        .version_minimum = lfh.version_made,
+        .gp_bits = lfh.gp_bits,
+        .compression_method = lfh.compression_method,
+        .last_mod_file_time = lfh.last_mod_file_time,
+        .last_mod_file_date = lfh.last_mod_file_date,
+        .crc32 = lfh.crc32,
+        .compressed_size = lfh.compressed_size,
+        .uncompressed_size = lfh.uncompressed_size,
+        .length = zip_lfh_min,
+
+        .file_name = "",
+        .extra_field = "",
+        .zip64 = false,
+    };
 
     if (overflow(header.offset + header.length, lfh.file_name_length, buffer.len))
         return error.LfhFileNameOverflow;
@@ -994,17 +1000,19 @@ fn decodeLfh(buffer: []const u8, offset: u64, header: *Lfh) errors!void {
         header.extra_field,
         header.file_name,
     );
+    return header;
 }
 
-fn decodeDdr(buffer: []const u8, offset: u64, header: *Ddr) errors!void {
+fn decodeDdr(buffer: []const u8, offset: u64, zip64: bool) errors!Ddr {
     assert(offset < buffer.len);
     var min: u64 = zip_ddr_min;
-    if (header.zip64) min = zip_ddr_64_min;
+    if (zip64) min = zip_ddr_64_min;
 
     // The DDR signature is optional but we expect at least 4 bytes regardless:
     if (overflow(offset, Ddr.signature.len, buffer.len))
         return error.DdrOverflow;
 
+    var header: Ddr = undefined;
     var off = offset;
     if (mem.startsWith(u8, buffer[offset..], Ddr.signature)) {
         header.offset = off;
@@ -1030,13 +1038,13 @@ fn decodeDdr(buffer: []const u8, offset: u64, header: *Ddr) errors!void {
         header.compressed_size = mem.readIntLittle(u32, buf[4..8]);
         header.uncompressed_size = mem.readIntLittle(u32, buf[8..12]);
     }
+    return header;
 }
 
 fn decodeCdh(
     buffer: []const u8,
     offset: u64,
-    header: *Cdh,
-) errors!void {
+) errors!Cdh {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     var fbs = std.io.fixedBufferStream(buf);
@@ -1058,19 +1066,26 @@ fn decodeCdh(
     // - (un)compressed size
     // - *_length: Should be converted to a slice
     // - *_file_attributes: only used here for unix/dir check.
-    header.offset = offset;
-    header.gp_bits = @as(GeneralPurposeBits, @bitCast(cdh2.gp_bits));
-    header.compression_method = @as(CompressionMethod, @enumFromInt(cdh2.compression_method));
-    header.last_mod_file_time = cdh2.last_mod_file_time;
-    header.last_mod_file_date = cdh2.last_mod_file_date;
-    header.crc32 = cdh2.crc32;
-    header.compressed_size = cdh2.compressed_size;
-    header.uncompressed_size = cdh2.uncompressed_size;
-    header.disk = cdh2.disk_number_start;
-    header.relative_offset = cdh2.relative_offset;
+    var header = Cdh{
+        .offset = offset,
+        .gp_bits = @as(GeneralPurposeBits, @bitCast(cdh2.gp_bits)),
+        .compression_method = @as(CompressionMethod, @enumFromInt(cdh2.compression_method)),
+        .last_mod_file_time = cdh2.last_mod_file_time,
+        .last_mod_file_date = cdh2.last_mod_file_date,
+        .crc32 = cdh2.crc32,
+        .compressed_size = cdh2.compressed_size,
+        .uncompressed_size = cdh2.uncompressed_size,
+        .disk = cdh2.disk_number_start,
+        .relative_offset = cdh2.relative_offset,
+        .length = zip_cdh_min,
+        .file_name = buffer[offset + zip_cdh_min ..][0..cdh2.file_name_length],
 
-    header.length = zip_cdh_min;
-    header.file_name = buffer[header.offset + header.length ..][0..cdh2.file_name_length];
+        .extra_field = "",
+        .file_comment = "",
+        .zip64 = false,
+        .unix_mode = 0,
+        .directory = false,
+    };
     header.length += header.file_name.len;
     if (overflow(header.offset, header.length, buffer.len))
         return error.CdhFileNameOverflow;
@@ -1093,7 +1108,6 @@ fn decodeCdh(
         header.file_name[header.file_name.len - 1] == '/');
 
     // ZIP64:
-    header.zip64 = false;
     if (header.compressed_size == math.maxInt(u32) or
         header.uncompressed_size == math.maxInt(u32) or
         header.relative_offset == math.maxInt(u32) or
@@ -1139,13 +1153,13 @@ fn decodeCdh(
         if (header.compressed_size > 0) return error.DirectoryCompressed;
         if (header.uncompressed_size > 0) return error.DirectoryUncompressed;
     }
+    return header;
 }
 
 fn decodeEocdl64(
     buffer: []const u8,
     offset: u64,
-    header: *Eocdl64,
-) errors!void {
+) errors!Eocdl64 {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     if (overflow(offset, zip_eocdl_64, buffer.len))
@@ -1153,19 +1167,22 @@ fn decodeEocdl64(
     if (!mem.startsWith(u8, buf, Eocdl64.signature))
         return error.Eocdl64Signature;
 
-    header.offset = offset;
-    header.disk = mem.readIntLittle(u32, buf[4..8]);
-    header.eocdr_64_offset = mem.readIntLittle(u64, buf[8..16]);
-    header.disks = mem.readIntLittle(u32, buf[16..20]);
-    header.length = zip_eocdl_64;
+    var header = Eocdl64{
+        .offset = offset,
+        .disk = mem.readIntLittle(u32, buf[4..8]),
+        .eocdr_64_offset = mem.readIntLittle(u64, buf[8..16]),
+        .disks = mem.readIntLittle(u32, buf[16..20]),
+        .length = zip_eocdl_64,
+    };
     if (header.disk != 0) return error.Eocdl64Disk;
     if (overflow(header.eocdr_64_offset, zip_eocdr_64_min, header.offset))
         return error.EocdrEocdl64Overflow;
     if (header.disks != 0 and header.disks != 1)
         return error.Eocdl64Disks;
+    return header;
 }
 
-fn decodeEocdr64(buffer: []const u8, offset: u64, header: *Eocdr64) errors!void {
+fn decodeEocdr64(buffer: []const u8, offset: u64) errors!Eocdr64 {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     var fbs = std.io.fixedBufferStream(buf);
@@ -1178,16 +1195,20 @@ fn decodeEocdr64(buffer: []const u8, offset: u64, header: *Eocdr64) errors!void 
     if (eocdr.sig != @intFromEnum(Signature.eocdr64))
         return error.Eocdr64Signature;
 
-    header.offset = offset;
-    header.version_made = eocdr.version_made;
-    header.version_minimum = eocdr.version_needed;
-    header.disk = eocdr.disk;
-    header.cd_disk = eocdr.cd_disk;
-    header.cd_disk_records = eocdr.cd_disk_records;
-    header.cd_records = eocdr.cd_records;
-    header.cd_size = eocdr.cd_size;
-    header.cd_offset = eocdr.cd_offset;
-    header.length = zip_eocdr_64_min;
+    var header = Eocdr64{
+        .offset = offset,
+        .version_made = eocdr.version_made,
+        .version_minimum = eocdr.version_needed,
+        .disk = eocdr.disk,
+        .cd_disk = eocdr.cd_disk,
+        .cd_disk_records = eocdr.cd_disk_records,
+        .cd_records = eocdr.cd_records,
+        .cd_size = eocdr.cd_size,
+        .cd_offset = eocdr.cd_offset,
+        .length = zip_eocdr_64_min,
+
+        .extensible_data_sector = "",
+    };
 
     // The value stored in "size of zip64 end of central directory record" is the
     // size of the remaining record and excludes the leading 12 bytes:
@@ -1196,6 +1217,7 @@ fn decodeEocdr64(buffer: []const u8, offset: u64, header: *Eocdr64) errors!void 
     const extensible_length = eocdr.size - (zip_eocdr_64_min - 12);
     header.extensible_data_sector = buf[0..extensible_length];
     header.length += header.extensible_data_sector.len;
+    return header;
 }
 
 fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
@@ -1209,13 +1231,12 @@ fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
     {
         return;
     }
-    var eocdl_64: Eocdl64 = undefined;
-    var eocdr_64: Eocdr64 = undefined;
+
     if (header.offset < zip_eocdl_64)
         return error.Eocdl64NegativeOffset;
 
     assert(header.offset >= zip_eocdl_64);
-    decodeEocdl64(buffer, header.offset - zip_eocdl_64, &eocdl_64) catch |err| {
+    var eocdl_64 = decodeEocdl64(buffer, header.offset - zip_eocdl_64) catch |err| {
         // A header field may actually be FFFF or FFFFFFFF without any Zip64 format:
         if (err == error.Eocdl64Signature) return;
         return err;
@@ -1224,7 +1245,7 @@ fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
     assert(eocdl_64.offset + eocdl_64.length == header.offset);
     assert(!overflow(eocdl_64.eocdr_64_offset, zip_eocdr_64_min, eocdl_64.offset));
 
-    try decodeEocdr64(buffer, eocdl_64.eocdr_64_offset, &eocdr_64);
+    var eocdr_64 = try decodeEocdr64(buffer, eocdl_64.eocdr_64_offset);
     const eocdl_offset = eocdr_64.offset + eocdr_64.length;
     assert(eocdl_offset > eocdr_64.offset);
     if (eocdl_offset > eocdl_64.offset)
@@ -1272,32 +1293,38 @@ fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
     header.length = eocdr_64.length + eocdl_64.length + header.length;
 }
 
-fn decodeEocdr(buffer: []const u8, header: *Eocdr) errors!void {
-    if (overflow(header.offset, zip_eocdr_min, buffer.len))
+fn decodeEocdr(buffer: []const u8, offset: u64) errors!Eocdr {
+    if (overflow(offset, zip_eocdr_min, buffer.len))
         return error.EocdrOverflow;
-    const buf = buffer[header.offset..];
+    const buf = buffer[offset..];
     if (!mem.startsWith(u8, buf, Eocdr.signature))
         return error.EocdrSignature;
 
     // We consider header.offset to start at EOCDR_64 or EOCDR.
     // We consider header.length to include EOCDR_64, EOCDL_64 and EOCDR.
-    header.disk = mem.readIntLittle(u16, buf[4..6]);
-    header.cd_disk = mem.readIntLittle(u16, buf[6..8]);
-    header.cd_disk_records = mem.readIntLittle(u16, buf[8..10]);
-    header.cd_records = mem.readIntLittle(u16, buf[10..12]);
-    header.cd_size = mem.readIntLittle(u32, buf[12..16]);
-    header.cd_offset = mem.readIntLittle(u32, buf[16..20]);
-    header.comment_length = mem.readIntLittle(u16, buf[20..22]);
-    header.length = zip_eocdr_min;
-    header.comment = buffer.ptr + header.offset + header.length;
+    var header = Eocdr{
+        .offset = offset,
+        .disk = mem.readIntLittle(u16, buf[4..6]),
+        .cd_disk = mem.readIntLittle(u16, buf[6..8]),
+        .cd_disk_records = mem.readIntLittle(u16, buf[8..10]),
+        .cd_records = mem.readIntLittle(u16, buf[10..12]),
+        .cd_size = mem.readIntLittle(u32, buf[12..16]),
+        .cd_offset = mem.readIntLittle(u32, buf[16..20]),
+        .comment_length = mem.readIntLittle(u16, buf[20..22]),
+        .length = zip_eocdr_min,
+
+        .comment = "",
+        .zip64 = false,
+    };
     header.length += header.comment_length;
     if (overflow(header.offset, header.length, buffer.len))
         return error.EocdrCommentOverflow;
+    header.comment = buf[zip_eocdr_min..(zip_eocdr_min + header.comment_length)];
 
     // If we find an EOCDR_64 and EOCDL_64, we modify header.(offset, length):
     const length = zip_eocdr_min + header.comment_length;
     assert(header.length == length);
-    try decodeEocdr64Upgrade(buffer, header);
+    try decodeEocdr64Upgrade(buffer, &header);
     if (header.zip64) {
         const length_64 = zip_eocdr_64_min + zip_eocdl_64;
         assert(header.length >= length + length_64);
@@ -1325,6 +1352,7 @@ fn decodeEocdr(buffer: []const u8, header: *Eocdr) errors!void {
         else
             return error.AppendedDataBufferBleed;
     }
+    return header;
 }
 
 fn inflateRaw(ctx: *const Ctx, compressed: []const u8, uncompressed: []u8) errors!void {
@@ -1513,9 +1541,8 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
     if (mem.startsWith(u8, buffer, "xar!")) return error.Xar;
 
     // Locate and decode end of central directory record:
-    var eocdr: Eocdr = undefined;
-    eocdr.offset = try locateEocdr(buffer);
-    try decodeEocdr(buffer, &eocdr);
+    const offset = try locateEocdr(buffer);
+    var eocdr = try decodeEocdr(buffer, offset);
 
     // Locate the offset of the first local file header:
     var lfh_offset = try locateFirstLfh(buffer, &eocdr);
@@ -1524,14 +1551,11 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
     // Compare central directory headers with local file headers:
     var cdh: Cdh = undefined;
     var lfh: Lfh = undefined;
-    var ddr: Ddr = undefined;
-    var cdh_p: Cdh = undefined;
-    var lfh_p: Lfh = undefined;
     var cdh_offset = eocdr.cd_offset;
     var cdh_record: u64 = 0;
     while (cdh_record < eocdr.cd_records) {
         // Central Directory Header:
-        try decodeCdh(buffer, cdh_offset, &cdh);
+        cdh = try decodeCdh(buffer, cdh_offset);
 
         if (lfh_offset > cdh.relative_offset) {
             if (cdh.directory and cdh.relative_offset == 0 and
@@ -1550,7 +1574,7 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
 
         // Local File Header:
         assert(cdh.relative_offset == lfh_offset);
-        try decodeLfh(buffer, cdh.relative_offset, &lfh);
+        lfh = try decodeLfh(buffer, cdh.relative_offset);
         try diffCdhAndLfh(cdh, lfh);
         try verifySymlink(cdh, lfh, buffer);
         assert(lfh.length >= zip_lfh_min);
@@ -1562,8 +1586,7 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
 
         // Data Descriptor Record (optional):
         if (lfh.gp_bits.lfh_fields_zeroed) {
-            ddr.zip64 = lfh.zip64;
-            try decodeDdr(buffer, lfh_offset, &ddr);
+            const ddr = try decodeDdr(buffer, lfh_offset, lfh.zip64);
             try diffCdhAndDdr(cdh, ddr);
             try diffDdrLfh(&ddr, &lfh);
             lfh_offset += ddr.length;
@@ -1573,11 +1596,8 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
         // We descend into the data only after checking for LFH overlap above:
         // We can therefore descend only after decoding at least two entries.
         if (cdh_record > 0)
-            try verifyData(ctx, buffer, &cdh_p, &lfh_p);
+            try verifyData(ctx, buffer, &cdh, &lfh);
 
-        // Shallow copy the CDH and LFH to descend next time around the loop:
-        cdh_p = cdh;
-        lfh_p = lfh;
         assert(cdh.length >= zip_cdh_min);
         cdh_offset += cdh.length;
         cdh_record += 1;
@@ -1585,7 +1605,7 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
 
     // Descend into the previous CDH and LFH:
     if (cdh_record > 0)
-        try verifyData(ctx, buffer, &cdh_p, &lfh_p);
+        try verifyData(ctx, buffer, &cdh, &lfh);
     if (lfh_offset > eocdr.cd_offset) return error.LfOverflow;
     if (lfh_offset < eocdr.cd_offset) {
         assert(eocdr.cd_offset <= buffer.len);
