@@ -366,10 +366,8 @@ pub fn main() !void {
     }
 
     while (next_arg) |arg| : (next_arg = arg_iterator.next()) {
-        var file = try std.fs.cwd().openFile(arg, .{});
-        defer file.close();
-        const zip = try file.readToEndAlloc(allocator, std.math.maxInt(u32));
-        defer allocator.free(zip);
+        var zip = try open_mmap(arg);
+        defer std.os.munmap(zip);
 
         var ret_zig: convertedErrors = error.ok;
         pure.zip(zip, allocator) catch |err| {
@@ -386,4 +384,12 @@ pub fn main() !void {
     }
 
     try buf_out.flush();
+}
+
+// Result must be closed with std.os.munmap
+fn open_mmap(file_path: []const u8) ![]align(std.mem.page_size) u8 {
+    var f = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
+    defer f.close();
+    const stat = try f.stat();
+    return try std.os.mmap(null, stat.size, std.os.PROT.READ, std.os.MAP.PRIVATE, f.handle, 0);
 }
