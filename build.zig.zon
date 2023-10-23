@@ -5,13 +5,13 @@
         // Used for regression testing against C version of pure
         .zlib = .{
             .url = "git+https://github.com/MFAshby/zig-build-zlib#f7f6262574fbfffd0202b4ad881a0cec1c7c189b",
-	        .hash = "1220a81facdcb6cb3676ac1189c35477540854d31c17d63cf3bdc8b94452f781d286",
+            .hash = "1220a81facdcb6cb3676ac1189c35477540854d31c17d63cf3bdc8b94452f781d286",
         },
         // Used for regression testing, it has a folder of interestingly malformed ZIP files.
         .libzip = .{
             .url = "https://github.com/nih-at/libzip/releases/download/v1.10.1/libzip-1.10.1.tar.gz",
             .hash = "1220be3870d531f0b2560f2de80593cf6d6950f97da940d90b0e4ed8c7e7f112dbaa",
-        }
+        },
     },
     .paths = .{""},
 }
