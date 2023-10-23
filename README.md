@@ -36,10 +36,6 @@ zig-out/bin/pure path/to/libzip/regress/*.zip
 
 ## TODOs
 
-- Nested zip files are recursively analysed to detect zip bombs, and the code
-  will allocate memory for if they are compressed. The original code would clean
-  up this memory and did not leak, but my rewrite did. I'm working around this
-  by using an arena allocator.
 - The original code would read the Zip structures by manually reading
   little-endian integers and incrementing an offset into the file. I was
   part-way through a refactor that would read packed structs, so that I could
