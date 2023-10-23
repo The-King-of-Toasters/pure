@@ -1,6 +1,12 @@
 const std = @import("std");
+const os = std.os;
+const mem = std.mem;
+const log = std.log;
+
 const pure = @import("pure.zig");
 const regress = @import("regress");
+
+const rlog = log.scoped(.regress);
 
 // Runs a regression test of C version of pure against Zig version
 // Using libzip regression testing set.
@@ -18,28 +24,32 @@ pub fn main() !void {
     defer walker.deinit();
     var count: usize = 0;
     while (try walker.next()) |entry| {
-        if (std.mem.endsWith(u8, entry.basename, ".zip")) {
-            var zip = try open_mmap(entry.dir, entry.path);
-            defer std.os.munmap(zip);
-            var ret_zig: convertedErrors = error.ok;
-            pure.zip(zip, allocator) catch |err| {
-                ret_zig = err;
-            };
-            const ret_c = pure_zip(zip.ptr, zip.len, 0);
-            if (ret_zig != convertError(ret_c))
-                std.log.err("{s}: {} instead of {}\n", .{ entry.path, ret_zig, ret_c });
-            count += 1;
-        }
+        if (!mem.endsWith(u8, entry.basename, ".zip"))
+            continue;
+
+        const zip = try open_mmap(entry.dir, entry.path);
+        defer os.munmap(zip);
+        var ret_zig: convertedErrors = error.ok;
+        pure.zip(zip, allocator) catch |err| {
+            ret_zig = err;
+        };
+        const ret_c = pure_zip(zip.ptr, zip.len, 0);
+        if (ret_zig != convertError(ret_c))
+            rlog.err("{s}: {} instead of {}", .{ entry.path, ret_zig, ret_c });
+        count += 1;
     }
-    std.log.info("checked {} zips", .{count});
+    rlog.info("checked {} zips", .{count});
 }
 
 // Result must be closed with std.os.munmap
-fn open_mmap(dir: std.fs.Dir, file_path: []const u8) ![]align(std.mem.page_size) u8 {
-    var f = try dir.openFile(file_path, .{ .mode = .read_only });
+fn open_mmap(
+    dir: std.fs.Dir,
+    path: []const u8,
+) ![]align(mem.page_size) u8 {
+    var f = try dir.openFile(path, .{ .mode = .read_only });
     defer f.close();
     const stat = try f.stat();
-    return try std.os.mmap(null, stat.size, std.os.PROT.READ, std.os.MAP.PRIVATE, f.handle, 0);
+    return try std.os.mmap(null, stat.size, os.PROT.READ, os.MAP.PRIVATE, f.handle, 0);
 }
 
 pub const E = enum(c_int) {
