@@ -1,5 +1,6 @@
 const std = @import("std");
 const os = std.os;
+const posix = std.posix;
 const mem = std.mem;
 const log = std.log;
 
@@ -19,7 +20,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var dir = try std.fs.openIterableDirAbsolute(regress.regression_zip_dir, .{});
+    var dir = try std.fs.openDirAbsolute(regress.regression_zip_dir, .{.iterate = true});
     var walker = try dir.walk(allocator);
     defer walker.deinit();
     var count: usize = 0;
@@ -28,7 +29,7 @@ pub fn main() !void {
             continue;
 
         const zip = try open_mmap(entry.dir, entry.path);
-        defer os.munmap(zip);
+        defer posix.munmap(zip);
         var ret_zig: convertedErrors = error.ok;
         pure.zip(zip, allocator) catch |err| {
             ret_zig = err;
@@ -41,7 +42,7 @@ pub fn main() !void {
     rlog.info("checked {} zips", .{count});
 }
 
-// Result must be closed with std.os.munmap
+// Result must be closed with posix.munmap
 fn open_mmap(
     dir: std.fs.Dir,
     path: []const u8,
@@ -49,7 +50,7 @@ fn open_mmap(
     var f = try dir.openFile(path, .{ .mode = .read_only });
     defer f.close();
     const stat = try f.stat();
-    return try std.os.mmap(null, stat.size, os.PROT.READ, os.MAP.PRIVATE, f.handle, 0);
+    return try posix.mmap(null, stat.size, posix.PROT.READ, posix.MAP{.TYPE = .PRIVATE}, f.handle, 0);
 }
 
 pub const E = enum(c_int) {

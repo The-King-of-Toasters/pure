@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -29,8 +29,8 @@ pub fn build(b: *std.build.Builder) void {
         .name = "purec",
         .target = target,
         .optimize = optimize,
+        .pic = true,
     });
-    pure_c.force_pic = true;
     pure_c.addCSourceFile(.{
         .file = .{ .path = "c-impl/pure.c" },
         .flags = &.{"-std=c89"},
@@ -49,7 +49,7 @@ pub fn build(b: *std.build.Builder) void {
     regress_opts.addOptionPath("regression_zip_dir", libzip.path("regress"));
     regress_exe.linkLibrary(libz);
     regress_exe.linkLibrary(pure_c);
-    regress_exe.addOptions("regress", regress_opts);
+    regress_exe.root_module.addOptions("regress", regress_opts);
     b.installArtifact(regress_exe);
 
     const run_cmd = b.addRunArtifact(regress_exe);

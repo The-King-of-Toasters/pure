@@ -8,7 +8,7 @@ const mem = std.mem;
 const crc = std.hash.Crc32;
 const math = std.math;
 const ascii = std.ascii;
-const deflate = std.compress.deflate;
+const flate = std.compress.flate;
 
 pub const errors = error{
     SizeMax,
@@ -223,7 +223,7 @@ inline fn pkCode(b1: u8, b2: u8) []const u8 {
 }
 
 inline fn pkCode2(b1: u8, b2: u8) u32 {
-    return mem.readIntLittle(u32, &[4]u8{ 'P', 'K', b1, b2 });
+    return mem.readInt(u32, &[4]u8{ 'P', 'K', b1, b2 }, .little);
 }
 
 const s_iconr = "Icon\r".*;
@@ -477,7 +477,7 @@ const Signature = enum(u32) {
     temp = gen(48, 48),
 
     inline fn gen(b1: u8, b2: u8) u32 {
-        return mem.readIntLittle(u32, &[4]u8{ 'P', 'K', b1, b2 });
+        return mem.readInt(u32, &[4]u8{ 'P', 'K', b1, b2 }, .little);
     }
 };
 
@@ -651,8 +651,8 @@ fn verifyExtraField(extra_field: []const u8, file_name: []const u8) errors!void 
     var offset: u64 = 0;
     while (offset + 2 + 2 <= extra_field.len) {
         const buf = extra_field[offset..];
-        const id = mem.readIntLittle(u16, buf[0..2]);
-        const size = mem.readIntLittle(u16, buf[2..4]);
+        const id = mem.readInt(u16, buf[0..2], .little);
+        const size = mem.readInt(u16, buf[2..4], .little);
         if (offset + 2 + 2 + size > extra_field.len)
             return error.ExtraFieldAttributeOverflow;
 
@@ -831,8 +831,8 @@ fn decodeEief64(
 
     var offset: u64 = 0;
     while (offset + 4 <= extra_field.len) {
-        const id = mem.readIntLittle(u16, extra_field[offset + 0 ..][0..2]);
-        const size = mem.readIntLittle(u16, extra_field[offset + 2 ..][0..2]);
+        const id = mem.readInt(u16, extra_field[offset + 0 ..][0..2], .little);
+        const size = mem.readInt(u16, extra_field[offset + 2 ..][0..2], .little);
         offset += 4;
         if (offset + size > extra_field.len)
             return error.ExtraFieldAttributeOverflow;
@@ -843,22 +843,22 @@ fn decodeEief64(
             var index: u64 = 0;
             if (uncompressed_size.* == math.maxInt(u32)) {
                 if (index + 8 > size) return error.Eief64UncompressedSize;
-                uncompressed_size.* = mem.readIntLittle(u64, extra_field[offset + index ..][0..8]);
+                uncompressed_size.* = mem.readInt(u64, extra_field[offset + index ..][0..8], .little);
                 index += 8;
             }
             if (compressed_size.* == math.maxInt(u32)) {
                 if (index + 8 > size) return error.Eief64CompressedSize;
-                compressed_size.* = mem.readIntLittle(u64, extra_field[offset + index ..][0..8]);
+                compressed_size.* = mem.readInt(u64, extra_field[offset + index ..][0..8], .little);
                 index += 8;
             }
             if (relative_offset.* == math.maxInt(u32)) {
                 if (index + 8 > size) return error.Eief64RelativeOffset;
-                relative_offset.* = mem.readIntLittle(u64, extra_field[offset + index ..][0..8]);
+                relative_offset.* = mem.readInt(u64, extra_field[offset + index ..][0..8], .little);
                 index += 8;
             }
             if (disk.* == math.maxInt(u16)) {
                 if (index + 4 > size) return error.Eief64Disk;
-                disk.* = mem.readIntLittle(u32, extra_field[offset + index ..][0..4]);
+                disk.* = mem.readInt(u32, extra_field[offset + index ..][0..4], .little);
                 index += 4;
             }
 
@@ -934,7 +934,7 @@ fn decodeLfh(buffer: []const u8, offset: u64) errors!Lfh {
 
     const lfh = reader.readStruct(LocalFileHeader.Complete) catch
         return error.LfhOverflow;
-    if (native_endian != .Little)
+    if (native_endian != .little)
         byteSwapAllFields(LocalFileHeader, &lfh);
     if (lfh.sig != LocalFileHeader.signature)
         return error.LfhSignature;
@@ -1029,14 +1029,14 @@ fn decodeDdr(buffer: []const u8, offset: u64, zip64: bool) errors!Ddr {
 
     if (header.zip64) {
         assert(min == 4 + 8 + 8);
-        header.crc32 = mem.readIntLittle(u32, buf[0..4]);
-        header.compressed_size = mem.readIntLittle(u64, buf[4..12]);
-        header.uncompressed_size = mem.readIntLittle(u64, buf[12..20]);
+        header.crc32 = mem.readInt(u32, buf[0..4], .little);
+        header.compressed_size = mem.readInt(u64, buf[4..12], .little);
+        header.uncompressed_size = mem.readInt(u64, buf[12..20], .little);
     } else {
         assert(min == 4 + 4 + 4);
-        header.crc32 = mem.readIntLittle(u32, buf[0..4]);
-        header.compressed_size = mem.readIntLittle(u32, buf[4..8]);
-        header.uncompressed_size = mem.readIntLittle(u32, buf[8..12]);
+        header.crc32 = mem.readInt(u32, buf[0..4], .little);
+        header.compressed_size = mem.readInt(u32, buf[4..8], .little);
+        header.uncompressed_size = mem.readInt(u32, buf[8..12], .little);
     }
     return header;
 }
@@ -1052,7 +1052,7 @@ fn decodeCdh(
 
     var cdh2 = reader.readStruct(CentralDirectory.Complete) catch
         return error.CdhOverflow;
-    if (native_endian != .Little)
+    if (native_endian != .little)
         mem.byteSwapAllFields(CentralDirectory, &cdh2);
     if (cdh2.sig != CentralDirectory.signature)
         return error.CdhSignature;
@@ -1167,11 +1167,11 @@ fn decodeEocdl64(
     if (!mem.startsWith(u8, buf, Eocdl64.signature))
         return error.Eocdl64Signature;
 
-    var header = Eocdl64{
+    const header = Eocdl64{
         .offset = offset,
-        .disk = mem.readIntLittle(u32, buf[4..8]),
-        .eocdr_64_offset = mem.readIntLittle(u64, buf[8..16]),
-        .disks = mem.readIntLittle(u32, buf[16..20]),
+        .disk = mem.readInt(u32, buf[4..8], .little),
+        .eocdr_64_offset = mem.readInt(u64, buf[8..16], .little),
+        .disks = mem.readInt(u32, buf[16..20], .little),
         .length = zip_eocdl_64,
     };
     if (header.disk != 0) return error.Eocdl64Disk;
@@ -1190,7 +1190,7 @@ fn decodeEocdr64(buffer: []const u8, offset: u64) errors!Eocdr64 {
 
     var eocdr = reader.readStruct(Eocdr64.Complete) catch
         return error.LfhOverflow;
-    if (native_endian != .Little)
+    if (native_endian != .little)
         mem.byteSwapAllFields(Eocdr64.Complete, &eocdr);
     if (eocdr.sig != @intFromEnum(Signature.eocdr64))
         return error.Eocdr64Signature;
@@ -1236,7 +1236,7 @@ fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
         return error.Eocdl64NegativeOffset;
 
     assert(header.offset >= zip_eocdl_64);
-    var eocdl_64 = decodeEocdl64(buffer, header.offset - zip_eocdl_64) catch |err| {
+    const eocdl_64 = decodeEocdl64(buffer, header.offset - zip_eocdl_64) catch |err| {
         // A header field may actually be FFFF or FFFFFFFF without any Zip64 format:
         if (err == error.Eocdl64Signature) return;
         return err;
@@ -1245,7 +1245,7 @@ fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
     assert(eocdl_64.offset + eocdl_64.length == header.offset);
     assert(!overflow(eocdl_64.eocdr_64_offset, zip_eocdr_64_min, eocdl_64.offset));
 
-    var eocdr_64 = try decodeEocdr64(buffer, eocdl_64.eocdr_64_offset);
+    const eocdr_64 = try decodeEocdr64(buffer, eocdl_64.eocdr_64_offset);
     const eocdl_offset = eocdr_64.offset + eocdr_64.length;
     assert(eocdl_offset > eocdr_64.offset);
     if (eocdl_offset > eocdl_64.offset)
@@ -1304,13 +1304,13 @@ fn decodeEocdr(buffer: []const u8, offset: u64) errors!Eocdr {
     // We consider header.length to include EOCDR_64, EOCDL_64 and EOCDR.
     var header = Eocdr{
         .offset = offset,
-        .disk = mem.readIntLittle(u16, buf[4..6]),
-        .cd_disk = mem.readIntLittle(u16, buf[6..8]),
-        .cd_disk_records = mem.readIntLittle(u16, buf[8..10]),
-        .cd_records = mem.readIntLittle(u16, buf[10..12]),
-        .cd_size = mem.readIntLittle(u32, buf[12..16]),
-        .cd_offset = mem.readIntLittle(u32, buf[16..20]),
-        .comment_length = mem.readIntLittle(u16, buf[20..22]),
+        .disk = mem.readInt(u16, buf[4..6], .little),
+        .cd_disk = mem.readInt(u16, buf[6..8], .little),
+        .cd_disk_records = mem.readInt(u16, buf[8..10], .little),
+        .cd_records = mem.readInt(u16, buf[10..12], .little),
+        .cd_size = mem.readInt(u32, buf[12..16], .little),
+        .cd_offset = mem.readInt(u32, buf[16..20], .little),
+        .comment_length = mem.readInt(u16, buf[20..22], .little),
         .length = zip_eocdr_min,
 
         .comment = "",
@@ -1356,16 +1356,17 @@ fn decodeEocdr(buffer: []const u8, offset: u64) errors!Eocdr {
 }
 
 fn inflateRaw(ctx: *const Ctx, compressed: []const u8, uncompressed: []u8) errors!void {
+    _ = ctx;
     if (uncompressed.len == 0) return;
     var fbs = std.io.fixedBufferStream(compressed);
-    var inflate = try deflate.decompressor(ctx.allocator, fbs.reader(), null);
-    defer inflate.deinit();
+    var inflate = flate.decompressor(fbs.reader());
+    //defer inflate.deinit();
 
     // TODO(stephen): Migrate across the rest of the zlib errors?
     inflate.reader().readNoEof(uncompressed) catch |err| switch (err) {
-        error.CorruptInput => return error.InflateData,
-        error.UnexpectedEndOfStream => return error.InflateStream,
-        error.OutOfMemory => return error.InflateMemory,
+        //error.CorruptInput => return error.InflateData,
+        //error.UnexpectedEndOfStream => return error.InflateStream,
+        //error.OutOfMemory => return error.InflateMemory,
         error.EndOfStream => return error.InflateUncompressedUnderflow,
         else => unreachable,
     };
@@ -1377,7 +1378,7 @@ fn locateEocdr(buffer: []const u8) errors!u64 {
     // The EOCDR can be at most EOCDR_MIN plus a variable length comment.
     // The variable length of the comment can be at most a 16-bit integer.
     // Assuming no garbage after the EOCDR, our maximum search distance is:
-    var floor = @max(0, index - math.maxInt(u16));
+    const floor = @max(0, index - math.maxInt(u16));
 
     assert(!overflow(@as(u64, @bitCast(index)), Eocdr.signature.len, buffer.len));
     while (index >= floor) : (index -= 1) {
@@ -1486,7 +1487,7 @@ fn verifyData(
     var raw_wrapper: MaybeOwned = .{ .data = "" };
     defer raw_wrapper.deinit(ctx.allocator);
     if (cdh.compression_method == .deflate) {
-        var data = try ctx.allocator.alloc(u8, cdh.uncompressed_size);
+        const data = try ctx.allocator.alloc(u8, cdh.uncompressed_size);
         errdefer ctx.allocator.free(data);
         try inflateRaw(
             ctx,
