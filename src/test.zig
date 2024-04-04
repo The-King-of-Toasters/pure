@@ -25,13 +25,13 @@ fn writeEocdr(fbs: *FbsType, opts: TestOptions) void {
     const writer = fbs.writer();
 
     writer.writeAll(&opts.signature) catch unreachable;
-    writer.writeIntLittle(u16, 0) catch unreachable; // disk
-    writer.writeIntLittle(u16, opts.disk) catch unreachable; // cd_disk
-    writer.writeIntLittle(u16, opts.disk_records) catch unreachable; // cd_disk_records
-    writer.writeIntLittle(u16, opts.records) catch unreachable; // cd_records
-    writer.writeIntLittle(u32, opts.size) catch unreachable; // cd_size
-    writer.writeIntLittle(u32, opts.offset) catch unreachable; // cd_offset
-    writer.writeIntLittle(u16, @intCast(opts.comment.len)) catch unreachable;
+    writer.writeInt(u16, 0, .little) catch unreachable; // disk
+    writer.writeInt(u16, opts.disk, .little) catch unreachable; // cd_disk
+    writer.writeInt(u16, opts.disk_records, .little) catch unreachable; // cd_disk_records
+    writer.writeInt(u16, opts.records, .little) catch unreachable; // cd_records
+    writer.writeInt(u32, opts.size, .little) catch unreachable; // cd_size
+    writer.writeInt(u32, opts.offset, .little) catch unreachable; // cd_offset
+    writer.writeInt(u16, @intCast(opts.comment.len), .little) catch unreachable;
     writer.writeAll(opts.comment) catch unreachable;
 }
 
