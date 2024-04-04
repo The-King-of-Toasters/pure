@@ -10,7 +10,15 @@ const math = std.math;
 const ascii = std.ascii;
 const flate = std.compress.flate;
 
-pub const errors = error{
+pub const Error = error{
+    ZipError,
+};
+
+pub const Diagnostics = struct {
+    subtype: ?ErrorSubtype = null,
+};
+
+pub const ErrorSubtype = enum {
     SizeMax,
     OutOfMemory,
     Overflow,
@@ -138,6 +146,7 @@ pub const errors = error{
     SymlinkTraversalRelativePath,
     SymlinkTraversalDoubleDots,
     SymlinkComponentOverflow,
+    StringInvalidUnicode,
     StringMax,
     StringNullByte,
     Inflate,
@@ -238,6 +247,7 @@ const Ctx = struct {
     size: u64 = 0,
     compressed_size: u64 = 0,
     uncompressed_size: u64 = 0,
+    diagnostics: ?*Diagnostics,
 };
 
 const LocalFileHeader = struct {
@@ -556,7 +566,7 @@ inline fn pathDrive(path: []const u8) bool {
 const ratio_size_min = 1 << 27;
 const ratio_score_max = 1 << 34;
 
-fn verifyCompressionRatio(compressed_size: u64, uncompressed_size: u64) errors!void {
+fn verifyCompressionRatio(ctx: *Ctx, compressed_size: u64, uncompressed_size: u64) Error!void {
     // Here, compressed size and uncompressed size could relate to the respective
     // sizes of an individual file or the sum of the sizes across an archive.
     //
@@ -574,28 +584,40 @@ fn verifyCompressionRatio(compressed_size: u64, uncompressed_size: u64) errors!v
     if (uncompressed_size < ratio_size_min) return;
     const ratio = @divTrunc(uncompressed_size, compressed_size);
     const score = ratio * uncompressed_size;
-    if (score > ratio_score_max)
-        return error.BombRatio;
+    if (score > ratio_score_max) {
+        if (ctx.diagnostics) |diags| {
+            diags.subtype = .BombRatio;
+        }
+        return error.ZipError;
+    }
+}
+
+fn err(ctx: *Ctx, subtype: ErrorSubtype) Error {
+    if (ctx.diagnostics) |diags| {
+        diags.subtype = subtype;
+    }
+    return error.ZipError;
 }
 
 fn verifyCompressionMethod(
+    ctx: *Ctx,
     method: CompressionMethod,
     compressed_size: u64,
     uncompressed_size: u64,
-) errors!void {
+) Error!void {
     switch (method) {
         .uncompressed => if (compressed_size != uncompressed_size)
-            return error.StoredCompressionSizeMismatch,
+            return err(ctx, .StoredCompressionSizeMismatch),
         .deflate => {},
-        .AEx => return error.CompressionMethodEncrypted,
+        .AEx => return err(ctx, .CompressionMethodEncrypted),
         // CVE-2016-9844:
         // Defend vulnerable implementations against overflow when the two-byte
         // compression method in the central directory file header exceeds 999.
         // https://bugs.launchpad.net/ubuntu/+source/unzip/+bug/1643750
         else => if (@intFromEnum(method) > 999)
-            return error.CompressionMethodDangerous
+            return err(ctx, .CompressionMethodDangerous)
         else
-            return error.CompressionMethodUnsupported,
+            return err(ctx, .CompressionMethodUnsupported),
     }
 
     // CVE-2018-18384:
@@ -604,12 +626,12 @@ fn verifyCompressionMethod(
     if (uncompressed_size > 0 and
         compressed_size > uncompressed_size and
         compressed_size / uncompressed_size >= 2)
-        return error.DangerousNegativeCompressionRatio;
+        return err(ctx, .DangerousNegativeCompressionRatio);
 }
 
-fn verifyModTime(date: u64, time: u64) errors!void {
-    if (date > math.maxInt(u16)) return error.DateOverflow;
-    if (time > math.maxInt(u16)) return error.TimeOverflow;
+fn verifyModTime(ctx: *Ctx, date: u64, time: u64) Error!void {
+    if (date > math.maxInt(u16)) return err(ctx, .DateOverflow);
+    if (time > math.maxInt(u16)) return err(ctx, .TimeOverflow);
     // An MS-DOS date is a packed 16-bit (2 bytes) value in which bits in the
     // value represent the day, month, and year:
     //
@@ -630,22 +652,22 @@ fn verifyModTime(date: u64, time: u64) errors!void {
     const minute = (time >> 5) & 63;
     const second = (time & 31) * 2;
 
-    if (year > 2099) return error.DateYearOverflow;
-    if (month > 12) return error.DateMonthOverflow;
-    if (day > 31) return error.DateDayOverflow;
-    if (hour > 23) return error.TimeHourOverflow;
-    if (minute > 59) return error.TimeMinuteOverflow;
-    if (second > 59) return error.TimeSecondOverflow;
+    if (year > 2099) return err(ctx, .DateYearOverflow);
+    if (month > 12) return err(ctx, .DateMonthOverflow);
+    if (day > 31) return err(ctx, .DateDayOverflow);
+    if (hour > 23) return err(ctx, .TimeHourOverflow);
+    if (minute > 59) return err(ctx, .TimeMinuteOverflow);
+    if (second > 59) return err(ctx, .TimeSecondOverflow);
 }
 
-fn verifyExtraField(extra_field: []const u8, file_name: []const u8) errors!void {
+fn verifyExtraField(ctx: *Ctx, extra_field: []const u8, file_name: []const u8) Error!void {
     if (extra_field.len > zip_extra_field_max)
-        return error.ExtraFieldMax;
+        return err(ctx, .ExtraFieldMax);
     // The extra field contains a variety of optional data such as OS-specific
     // attributes. It is divided into chunks, each with a 16-bit ID code and a
     // 16-bit length.
     if (extra_field.len != 0 and extra_field.len < 4)
-        return error.ExtraFieldMin;
+        return err(ctx, .ExtraFieldMin);
 
     // Check extra field attribute sizes, and specifically the unicode path:
     var offset: u64 = 0;
@@ -654,16 +676,16 @@ fn verifyExtraField(extra_field: []const u8, file_name: []const u8) errors!void 
         const id = mem.readInt(u16, buf[0..2], .little);
         const size = mem.readInt(u16, buf[2..4], .little);
         if (offset + 2 + 2 + size > extra_field.len)
-            return error.ExtraFieldAttributeOverflow;
+            return err(ctx, .ExtraFieldAttributeOverflow);
 
         if (id == 0x7075) {
             // We expect at least a 1-byte version followed by a 4-byte crc32:
             if (size < 1 + 4)
-                return error.ExtraFieldUnicodePathOverflow;
+                return err(ctx, .ExtraFieldUnicodePathOverflow);
             assert(offset + 2 + 2 + 1 <= extra_field.len);
             const version = buf[2 + 2];
             if (version != 1)
-                return error.ExtraFieldUnicodePathVersion;
+                return err(ctx, .ExtraFieldUnicodePathVersion);
             // We require the unicode path to match the central directory file even if
             // the crc32 of the non-unicode path is different. Otherwise, an attacker
             // could present an alternative extension to bypass content inspection.
@@ -671,7 +693,7 @@ fn verifyExtraField(extra_field: []const u8, file_name: []const u8) errors!void 
             //const unicode_path = extra_field[base .. base + size - 1 - 4];
             const unicode_path = buf[2 + 2 + 1 + 4 ..][0 .. size - 1 - 4];
             if (!mem.eql(u8, unicode_path, file_name))
-                return error.ExtraFieldUnicodePathDiff;
+                return err(ctx, .ExtraFieldUnicodePathDiff);
         }
 
         offset += 4;
@@ -679,12 +701,12 @@ fn verifyExtraField(extra_field: []const u8, file_name: []const u8) errors!void 
     }
 
     if (offset > extra_field.len)
-        return error.ExtraFieldOverflow;
+        return err(ctx, .ExtraFieldOverflow);
     if (offset < extra_field.len) {
         if (zeroes(extra_field[offset..extra_field.len]))
-            return error.ExtraFieldUnderflowZeroed
+            return err(ctx, .ExtraFieldUnderflowZeroed)
         else
-            return error.ExtraFieldUnderflowBufferBleed;
+            return err(ctx, .ExtraFieldUnderflowBufferBleed);
     }
 }
 
@@ -704,25 +726,25 @@ const S = struct {
     pub const ISVTX = 0o1000;
 };
 
-fn verifyUnixMode(value: u64) errors!void {
-    if (value > math.maxInt(u16)) return error.UnixModeOverflow;
+fn verifyUnixMode(ctx: *Ctx, value: u64) Error!void {
+    if (value > math.maxInt(u16)) return err(ctx, .UnixModeOverflow);
     // Detect dangerous file types:
     switch (value & S.IFMT) {
-        S.IFBLK => return error.UnixModeBlockDevice,
-        S.IFCHR => return error.UnixModeCharacterDevice,
-        S.IFIFO => return error.UnixModeFifo,
-        S.IFSOCK => return error.UnixModeSocket,
+        S.IFBLK => return err(ctx, .UnixModeBlockDevice),
+        S.IFCHR => return err(ctx, .UnixModeCharacterDevice),
+        S.IFIFO => return err(ctx, .UnixModeFifo),
+        S.IFSOCK => return err(ctx, .UnixModeSocket),
         else => {},
     }
     // Detect dangerous permissions:
     // CVE-2005-0602
     // https://marc.info/?l=bugtraq&m=110960796331943&w=2
-    if (value & S.ISVTX > 0) return error.UnixModePermissionsSticky;
-    if (value & S.ISGID > 0) return error.UnixModePermissionsSetgid;
-    if (value & S.ISUID > 0) return error.UnixModePermissionsSetuid;
+    if (value & S.ISVTX > 0) return err(ctx, .UnixModePermissionsSticky);
+    if (value & S.ISGID > 0) return err(ctx, .UnixModePermissionsSetgid);
+    if (value & S.ISUID > 0) return err(ctx, .UnixModePermissionsSetuid);
 }
 
-fn verifyFilename(name: []const u8) errors!void {
+fn verifyFilename(ctx: *Ctx, name: []const u8) Error!void {
     // A "file name" in this context is a path name with multiple components.
     // The file name length may be 0 if the archiver input came from stdin.
 
@@ -734,82 +756,86 @@ fn verifyFilename(name: []const u8) errors!void {
     // bugs, e.g. malloc(N * PATH_MAX) where the assumption is that user data
     // cannot exceed PATH_MAX.
     if (name.len > path_max)
-        return error.FileNameLength;
+        return err(ctx, .FileNameLength);
     // CVE-2003-0282 (aka "JELMER"):
     // Some zip implementations filter control characters amongst others.
     // This behavior can be exploited to mask ".." in a directory traversal.
     // https://www.securityfocus.com/archive/1/321090
     if (pathControlCharacters(name))
-        return error.FileNameControlCharacters;
+        return err(ctx, .FileNameControlCharacters);
     if (pathDrive(name))
-        return error.FileNameTraversalDrivePath;
+        return err(ctx, .FileNameTraversalDrivePath);
     if (pathRelative(name))
-        return error.FileNameTraversalRelativePath;
+        return err(ctx, .FileNameTraversalRelativePath);
     if (pathDoubleDots(name))
-        return error.FileNameTraversalDoubleDots;
+        return err(ctx, .FileNameTraversalDoubleDots);
     if (pathComponentOverflow(name))
-        return error.FileNameComponentOverflow;
+        return err(ctx, .FileNameComponentOverflow);
     // All slashes must be forward according to the APPNOTE.TXT specification:
     for (name) |c|
-        if (c == '\\') return error.FileNameBackslash;
+        if (c == '\\') return err(ctx, .FileNameBackslash);
 }
 
-fn verifyFlags(bits: GeneralPurposeBits) errors!void {
-    if (bits.traditional_encryption) return error.FlagTraditionalEncryption;
-    if (bits.enhanced_deflate) return error.FlagEnhancedDeflate;
-    if (bits.compressed_patched) return error.FlagCompressedPatchedData;
-    if (bits.strong_encryption) return error.FlagStrongEncryption;
-    if (bits.bit7_unused) return error.FlagUnusedBit7;
-    if (bits.bit8_unused) return error.FlagUnusedBit8;
-    if (bits.bit9_unused) return error.FlagUnusedBit9;
-    if (bits.bit10_unused) return error.FlagUnusedBit10;
-    if (bits.enhanced_compression) return error.FlagEnhancedCompression;
-    if (bits.masked_local_headers) return error.FlagMaskedLocalHeaders;
-    if (bits.bit14_reserved) return error.FlagReservedBit14;
-    if (bits.bit15_reserved) return error.FlagReservedBit15;
+fn verifyFlags(ctx: *Ctx, bits: GeneralPurposeBits) Error!void {
+    if (bits.traditional_encryption) return err(ctx, .FlagTraditionalEncryption);
+    if (bits.enhanced_deflate) return err(ctx, .FlagEnhancedDeflate);
+    if (bits.compressed_patched) return err(ctx, .FlagCompressedPatchedData);
+    if (bits.strong_encryption) return err(ctx, .FlagStrongEncryption);
+    if (bits.bit7_unused) return err(ctx, .FlagUnusedBit7);
+    if (bits.bit8_unused) return err(ctx, .FlagUnusedBit8);
+    if (bits.bit9_unused) return err(ctx, .FlagUnusedBit9);
+    if (bits.bit10_unused) return err(ctx, .FlagUnusedBit10);
+    if (bits.enhanced_compression) return err(ctx, .FlagEnhancedCompression);
+    if (bits.masked_local_headers) return err(ctx, .FlagMaskedLocalHeaders);
+    if (bits.bit14_reserved) return err(ctx, .FlagReservedBit14);
+    if (bits.bit15_reserved) return err(ctx, .FlagReservedBit15);
 }
 
-fn verifyString(string: []const u8, utf8: bool) errors!void {
-    if (string.len > zip_string_max) return error.StringMax;
+fn verifyString(ctx: *Ctx, string: []const u8, utf8: bool) Error!void {
+    if (string.len > zip_string_max) return err(ctx, .StringMax);
     for (string) |c|
-        if (c == 0) return error.StringNullByte;
+        if (c == 0) return err(ctx, .StringNullByte);
 
     if (utf8) {
         // TODO(joran): Verify that UTF-8 encoding is valid:
         //  Some systems such as macOS never bother to set bit 11 to indicate UTF-8.
         //  We therefore always attempt UTF-8 and fallback to CP437 only on error.
         //  If the string must be UTF-8 then reject the string as invalid.
+        if (!std.unicode.utf8ValidateSlice(string)) {
+            return err(ctx, .StringInvalidUnicode);
+        }
     }
 }
 
-fn verifySymlink(cdh: Cdh, lfh: Lfh, buffer: []const u8) errors!void {
+fn verifySymlink(ctx: *Ctx, cdh: Cdh, lfh: Lfh, buffer: []const u8) Error!void {
     if ((cdh.unix_mode & S.IFMT) != S.IFLNK)
         return;
     if (cdh.compression_method != .uncompressed)
-        return error.SymlinkCompressed;
+        return err(ctx, .SymlinkCompressed);
 
     assert(cdh.relative_offset == lfh.offset);
     assert(!overflow(cdh.relative_offset, lfh.length, cdh.offset));
     const offset = cdh.relative_offset + lfh.length;
     const symlink = buffer[offset..][0..cdh.compressed_size];
     // Check for PATH_MAX overflow:
-    if (symlink.len > path_max) return error.SymlinkLength;
+    if (symlink.len > path_max) return err(ctx, .SymlinkLength);
     // Check for control characters used to mask a directory traversal:
     if (pathControlCharacters(symlink))
-        return error.SymlinkControlCharacters;
+        return err(ctx, .SymlinkControlCharacters);
     // Check for a directory traversal:
     if (pathDrive(symlink))
-        return error.SymlinkTraversalDrivePath;
+        return err(ctx, .SymlinkTraversalDrivePath);
     if (pathRelative(symlink))
-        return error.SymlinkTraversalRelativePath;
+        return err(ctx, .SymlinkTraversalRelativePath);
     if (pathDoubleDots(symlink))
-        return error.SymlinkTraversalDoubleDots;
+        return err(ctx, .SymlinkTraversalDoubleDots);
     // Check for path component overflow:
     if (pathComponentOverflow(symlink))
-        return error.SymlinkComponentOverflow;
+        return err(ctx, .SymlinkComponentOverflow);
 }
 
 fn decodeEief64(
+    ctx: *Ctx,
     extra_field: []const u8,
     compressed_size: *u64,
     uncompressed_size: *u64,
@@ -817,7 +843,7 @@ fn decodeEief64(
     disk: *u64,
     zip64: *bool,
     lfh: bool,
-) errors!void {
+) Error!void {
     assert(compressed_size.* == math.maxInt(u32) or
         uncompressed_size.* == math.maxInt(u32) or
         relative_offset.* == math.maxInt(u32) or
@@ -825,9 +851,9 @@ fn decodeEief64(
     assert(zip64.* == false);
 
     if (extra_field.len > zip_extra_field_max)
-        return error.ExtraFieldMax;
+        return err(ctx, .ExtraFieldMax);
     if (extra_field.len != 0 and extra_field.len < 4)
-        return error.ExtraFieldMin;
+        return err(ctx, .ExtraFieldMin);
 
     var offset: u64 = 0;
     while (offset + 4 <= extra_field.len) {
@@ -835,29 +861,29 @@ fn decodeEief64(
         const size = mem.readInt(u16, extra_field[offset + 2 ..][0..2], .little);
         offset += 4;
         if (offset + size > extra_field.len)
-            return error.ExtraFieldAttributeOverflow;
+            return err(ctx, .ExtraFieldAttributeOverflow);
 
         if (id == 0x0001) {
             zip64.* = true;
 
             var index: u64 = 0;
             if (uncompressed_size.* == math.maxInt(u32)) {
-                if (index + 8 > size) return error.Eief64UncompressedSize;
+                if (index + 8 > size) return err(ctx, .Eief64UncompressedSize);
                 uncompressed_size.* = mem.readInt(u64, extra_field[offset + index ..][0..8], .little);
                 index += 8;
             }
             if (compressed_size.* == math.maxInt(u32)) {
-                if (index + 8 > size) return error.Eief64CompressedSize;
+                if (index + 8 > size) return err(ctx, .Eief64CompressedSize);
                 compressed_size.* = mem.readInt(u64, extra_field[offset + index ..][0..8], .little);
                 index += 8;
             }
             if (relative_offset.* == math.maxInt(u32)) {
-                if (index + 8 > size) return error.Eief64RelativeOffset;
+                if (index + 8 > size) return err(ctx, .Eief64RelativeOffset);
                 relative_offset.* = mem.readInt(u64, extra_field[offset + index ..][0..8], .little);
                 index += 8;
             }
             if (disk.* == math.maxInt(u16)) {
-                if (index + 4 > size) return error.Eief64Disk;
+                if (index + 4 > size) return err(ctx, .Eief64Disk);
                 disk.* = mem.readInt(u32, extra_field[offset + index ..][0..4], .little);
                 index += 4;
             }
@@ -865,13 +891,13 @@ fn decodeEief64(
             assert(offset + size <= extra_field.len);
             if (index < size) {
                 if (zeroes(extra_field[offset + index .. offset + size]))
-                    return error.Eief64UnderflowZeroed
+                    return err(ctx, .Eief64UnderflowZeroed)
                 else
-                    return error.Eief64UnderflowBufferBleed;
+                    return err(ctx, .Eief64UnderflowBufferBleed);
             }
 
             // The EIEF in an LFH must include both uncompressed and compressed size:
-            if (lfh and index != 16) return error.Eief64Lfh;
+            if (lfh and index != 16) return err(ctx, .Eief64Lfh);
             assert(index == size);
         }
 
@@ -894,50 +920,50 @@ fn diffCld(cdh_value: u64, lfh_value: u64, lfh: Lfh) bool {
 }
 
 // Compare DDR against CDH:
-fn diffCdhAndDdr(cdh: Cdh, ddr: Ddr) errors!void {
+fn diffCdhAndDdr(ctx: *Ctx, cdh: Cdh, ddr: Ddr) Error!void {
     if (ddr.crc32 != cdh.crc32)
-        return error.DiffDdrCrc32;
+        return err(ctx, .DiffDdrCrc32);
     if (ddr.compressed_size != cdh.compressed_size)
-        return error.DiffDdrCompressedSize;
+        return err(ctx, .DiffDdrCompressedSize);
     if (ddr.uncompressed_size != cdh.uncompressed_size)
-        return error.DiffDdrUncompressedSize;
+        return err(ctx, .DiffDdrUncompressedSize);
 }
 
 // Compare LFH against CDH:
-fn diffCdhAndLfh(cdh: Cdh, lfh: Lfh) errors!void {
+fn diffCdhAndLfh(ctx: *Ctx, cdh: Cdh, lfh: Lfh) Error!void {
     if (@as(u16, @bitCast(lfh.gp_bits)) != @as(u16, @bitCast(cdh.gp_bits)))
-        return error.DiffLfhGeneralPurposeBitFlag;
+        return err(ctx, .DiffLfhGeneralPurposeBitFlag);
     if (lfh.compression_method != cdh.compression_method)
-        return error.DiffLfhCompressionMethod;
+        return err(ctx, .DiffLfhCompressionMethod);
     if (lfh.last_mod_file_time != cdh.last_mod_file_time)
-        return error.DiffLfhLastModFileTime;
+        return err(ctx, .DiffLfhLastModFileTime);
     if (lfh.last_mod_file_date != cdh.last_mod_file_date)
-        return error.DiffLfhLastModFileDate;
+        return err(ctx, .DiffLfhLastModFileDate);
     if (diffCld(cdh.crc32, lfh.crc32, lfh))
-        return error.DiffLfhCrc32;
+        return err(ctx, .DiffLfhCrc32);
     if (diffCld(cdh.compressed_size, lfh.compressed_size, lfh))
-        return error.DiffLfhCompressedSize;
+        return err(ctx, .DiffLfhCompressedSize);
     if (diffCld(cdh.uncompressed_size, lfh.uncompressed_size, lfh))
-        return error.DiffLfhUncompressedSize;
+        return err(ctx, .DiffLfhUncompressedSize);
     if (lfh.file_name.len != cdh.file_name.len)
-        return error.DiffLfhFileNameLength;
+        return err(ctx, .DiffLfhFileNameLength);
     // We assume decode_lfh() and decode_cdh() have already checked for overflow:
     if (!mem.eql(u8, lfh.file_name, cdh.file_name))
-        return error.DiffLfhFileName;
+        return err(ctx, .DiffLfhFileName);
 }
 
-fn decodeLfh(buffer: []const u8, offset: u64) errors!Lfh {
+fn decodeLfh(ctx: *Ctx, buffer: []const u8, offset: u64) Error!Lfh {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     var fbs = std.io.fixedBufferStream(buf);
     const reader = fbs.reader();
 
     const lfh = reader.readStruct(LocalFileHeader.Complete) catch
-        return error.LfhOverflow;
+        return err(ctx, .LfhOverflow);
     if (native_endian != .little)
         byteSwapAllFields(LocalFileHeader, &lfh);
     if (lfh.sig != LocalFileHeader.signature)
-        return error.LfhSignature;
+        return err(ctx, .LfhSignature);
 
     var header = Lfh{
         .offset = offset,
@@ -957,12 +983,12 @@ fn decodeLfh(buffer: []const u8, offset: u64) errors!Lfh {
     };
 
     if (overflow(header.offset + header.length, lfh.file_name_length, buffer.len))
-        return error.LfhFileNameOverflow;
+        return err(ctx, .LfhFileNameOverflow);
     header.file_name = buffer[header.offset + header.length ..][0..lfh.file_name_length];
     header.length += lfh.file_name_length;
 
     if (overflow(header.offset + header.length, lfh.extra_field_length, buffer.len))
-        return error.LfhExtraFieldOverflow;
+        return err(ctx, .LfhExtraFieldOverflow);
     header.extra_field = buffer[header.offset + header.length ..][0..lfh.extra_field_length];
     header.length += lfh.extra_field_length;
 
@@ -974,6 +1000,7 @@ fn decodeLfh(buffer: []const u8, offset: u64) errors!Lfh {
         var relative_offset: u64 = 0;
         var disk: u64 = 0;
         try decodeEief64(
+            ctx,
             header.extra_field,
             &header.compressed_size,
             &header.uncompressed_size,
@@ -984,33 +1011,36 @@ fn decodeLfh(buffer: []const u8, offset: u64) errors!Lfh {
         );
     }
 
-    try verifyFlags(header.gp_bits);
+    try verifyFlags(ctx, header.gp_bits);
     try verifyCompressionMethod(
+        ctx,
         header.compression_method,
         header.compressed_size,
         header.uncompressed_size,
     );
     try verifyModTime(
+        ctx,
         header.last_mod_file_date,
         header.last_mod_file_time,
     );
-    try verifyFilename(header.file_name);
-    try verifyString(header.file_name, header.gp_bits.utf8_fields);
+    try verifyFilename(ctx, header.file_name);
+    try verifyString(ctx, header.file_name, header.gp_bits.utf8_fields);
     try verifyExtraField(
+        ctx,
         header.extra_field,
         header.file_name,
     );
     return header;
 }
 
-fn decodeDdr(buffer: []const u8, offset: u64, zip64: bool) errors!Ddr {
+fn decodeDdr(ctx: *Ctx, buffer: []const u8, offset: u64, zip64: bool) Error!Ddr {
     assert(offset < buffer.len);
     var min: u64 = zip_ddr_min;
     if (zip64) min = zip_ddr_64_min;
 
     // The DDR signature is optional but we expect at least 4 bytes regardless:
     if (overflow(offset, Ddr.signature.len, buffer.len))
-        return error.DdrOverflow;
+        return err(ctx, .DdrOverflow);
 
     var header: Ddr = undefined;
     var off = offset;
@@ -1024,7 +1054,7 @@ fn decodeDdr(buffer: []const u8, offset: u64, zip64: bool) errors!Ddr {
     }
 
     if (overflow(off, min, buffer.len))
-        return error.DdrOverflow;
+        return err(ctx, .DdrOverflow);
     const buf = buffer[off..];
 
     if (header.zip64) {
@@ -1042,20 +1072,21 @@ fn decodeDdr(buffer: []const u8, offset: u64, zip64: bool) errors!Ddr {
 }
 
 fn decodeCdh(
+    ctx: *Ctx,
     buffer: []const u8,
     offset: u64,
-) errors!Cdh {
+) Error!Cdh {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     var fbs = std.io.fixedBufferStream(buf);
     const reader = fbs.reader();
 
     var cdh2 = reader.readStruct(CentralDirectory.Complete) catch
-        return error.CdhOverflow;
+        return err(ctx, .CdhOverflow);
     if (native_endian != .little)
         mem.byteSwapAllFields(CentralDirectory, &cdh2);
     if (cdh2.sig != CentralDirectory.signature)
-        return error.CdhSignature;
+        return err(ctx, .CdhSignature);
 
     // Used fields
     // - version_made: only used here for unix_mode
@@ -1088,15 +1119,15 @@ fn decodeCdh(
     };
     header.length += header.file_name.len;
     if (overflow(header.offset, header.length, buffer.len))
-        return error.CdhFileNameOverflow;
+        return err(ctx, .CdhFileNameOverflow);
     header.extra_field = buffer[header.offset + header.length ..][0..cdh2.extra_field_length];
     header.length += header.extra_field.len;
     if (overflow(header.offset, header.length, buffer.len))
-        return error.CdhExtraFieldOverflow;
+        return err(ctx, .CdhExtraFieldOverflow);
     header.file_comment = buffer[header.offset + header.length ..][0..cdh2.file_comment_length];
     header.length += header.file_comment.len;
     if (overflow(header.offset, header.length, buffer.len))
-        return error.CdhFileCommentOverflow;
+        return err(ctx, .CdhFileCommentOverflow);
     header.unix_mode = 0;
     if ((cdh2.version_made >> 8) == zip_version_made_unix)
         header.unix_mode = cdh2.external_file_attributes >> 16;
@@ -1114,6 +1145,7 @@ fn decodeCdh(
         header.disk == math.maxInt(u16))
     {
         try decodeEief64(
+            ctx,
             header.extra_field,
             &header.compressed_size,
             &header.uncompressed_size,
@@ -1125,12 +1157,13 @@ fn decodeCdh(
     }
 
     if (header.relative_offset > buffer.len)
-        return error.CdhRelativeOffsetOverflow;
+        return err(ctx, .CdhRelativeOffsetOverflow);
     if (header.relative_offset > offset)
-        return error.CdhRelativeOffsetOverlap;
+        return err(ctx, .CdhRelativeOffsetOverlap);
 
-    try verifyFlags(header.gp_bits);
+    try verifyFlags(ctx, header.gp_bits);
     try verifyCompressionMethod(
+        ctx,
         header.compression_method,
         header.compressed_size,
         header.uncompressed_size,
@@ -1139,33 +1172,35 @@ fn decodeCdh(
     // because the actual sizes may be in the DDR, but a CDH cannot be ex nihilo.
     // We cross-check the DDR against the CDH, so this check applies to the DDR:
     if (header.compressed_size == 0 and header.uncompressed_size != 0)
-        return error.ExNihilo;
+        return err(ctx, .ExNihilo);
 
-    try verifyModTime(header.last_mod_file_date, header.last_mod_file_time);
-    try verifyFilename(header.file_name);
-    try verifyString(header.file_name, header.gp_bits.utf8_fields);
-    try verifyExtraField(header.extra_field, header.file_name);
-    try verifyString(header.file_comment, header.gp_bits.utf8_fields);
+    try verifyModTime(ctx, header.last_mod_file_date, header.last_mod_file_time);
+    try verifyFilename(ctx, header.file_name);
+    try verifyString(ctx, header.file_name, header.gp_bits.utf8_fields);
+    try verifyExtraField(ctx, header.extra_field, header.file_name);
+    try verifyString(ctx, header.file_comment, header.gp_bits.utf8_fields);
     if (header.disk != 0)
-        return error.MultipleDisks;
-    try verifyUnixMode(header.unix_mode);
+        return err(ctx, .MultipleDisks);
+    try verifyUnixMode(ctx, header.unix_mode);
     if (header.directory) {
-        if (header.compressed_size > 0) return error.DirectoryCompressed;
-        if (header.uncompressed_size > 0) return error.DirectoryUncompressed;
+        if (header.compressed_size > 0) return err(ctx, .DirectoryCompressed);
+        if (header.uncompressed_size > 0) return err(ctx, .DirectoryUncompressed);
     }
     return header;
 }
 
 fn decodeEocdl64(
+    ctx: *Ctx,
     buffer: []const u8,
     offset: u64,
-) errors!Eocdl64 {
+) Error!?Eocdl64 {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     if (overflow(offset, zip_eocdl_64, buffer.len))
-        return error.Eocdl64Overflow;
+        return err(ctx, .Eocdl64Overflow);
     if (!mem.startsWith(u8, buf, Eocdl64.signature))
-        return error.Eocdl64Signature;
+        // A header field may actually be FFFF or FFFFFFFF without any Zip64 format:
+        return null;
 
     const header = Eocdl64{
         .offset = offset,
@@ -1174,26 +1209,26 @@ fn decodeEocdl64(
         .disks = mem.readInt(u32, buf[16..20], .little),
         .length = zip_eocdl_64,
     };
-    if (header.disk != 0) return error.Eocdl64Disk;
+    if (header.disk != 0) return err(ctx, .Eocdl64Disk);
     if (overflow(header.eocdr_64_offset, zip_eocdr_64_min, header.offset))
-        return error.EocdrEocdl64Overflow;
+        return err(ctx, .EocdrEocdl64Overflow);
     if (header.disks != 0 and header.disks != 1)
-        return error.Eocdl64Disks;
+        return err(ctx, .Eocdl64Disks);
     return header;
 }
 
-fn decodeEocdr64(buffer: []const u8, offset: u64) errors!Eocdr64 {
+fn decodeEocdr64(ctx: *Ctx, buffer: []const u8, offset: u64) Error!Eocdr64 {
     assert(offset < buffer.len);
     const buf = buffer[offset..];
     var fbs = std.io.fixedBufferStream(buf);
     const reader = fbs.reader();
 
     var eocdr = reader.readStruct(Eocdr64.Complete) catch
-        return error.LfhOverflow;
+        return err(ctx, .LfhOverflow);
     if (native_endian != .little)
         mem.byteSwapAllFields(Eocdr64.Complete, &eocdr);
     if (eocdr.sig != @intFromEnum(Signature.eocdr64))
-        return error.Eocdr64Signature;
+        return err(ctx, .Eocdr64Signature);
 
     var header = Eocdr64{
         .offset = offset,
@@ -1220,7 +1255,7 @@ fn decodeEocdr64(buffer: []const u8, offset: u64) errors!Eocdr64 {
     return header;
 }
 
-fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
+fn decodeEocdr64Upgrade(ctx: *Ctx, buffer: []const u8, header: *Eocdr) Error!void {
     header.zip64 = false;
     if (header.disk != math.maxInt(u16) and
         header.cd_disk != math.maxInt(u16) and
@@ -1233,29 +1268,27 @@ fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
     }
 
     if (header.offset < zip_eocdl_64)
-        return error.Eocdl64NegativeOffset;
+        return err(ctx, .Eocdl64NegativeOffset);
 
     assert(header.offset >= zip_eocdl_64);
-    const eocdl_64 = decodeEocdl64(buffer, header.offset - zip_eocdl_64) catch |err| {
-        // A header field may actually be FFFF or FFFFFFFF without any Zip64 format:
-        if (err == error.Eocdl64Signature) return;
-        return err;
+    const eocdl_64 = if (try decodeEocdl64(ctx, buffer, header.offset - zip_eocdl_64)) |x| x else {
+        return;
     };
     assert(!overflow(eocdl_64.offset, eocdl_64.length, header.offset));
     assert(eocdl_64.offset + eocdl_64.length == header.offset);
     assert(!overflow(eocdl_64.eocdr_64_offset, zip_eocdr_64_min, eocdl_64.offset));
 
-    const eocdr_64 = try decodeEocdr64(buffer, eocdl_64.eocdr_64_offset);
+    const eocdr_64 = try decodeEocdr64(ctx, buffer, eocdl_64.eocdr_64_offset);
     const eocdl_offset = eocdr_64.offset + eocdr_64.length;
     assert(eocdl_offset > eocdr_64.offset);
     if (eocdl_offset > eocdl_64.offset)
-        return error.EocdrEocdl64Overflow;
+        return err(ctx, .EocdrEocdl64Overflow);
     if (eocdl_offset < eocdl_64.offset) {
         assert(eocdl_64.offset <= buffer.len);
         return if (zeroes(buffer[eocdl_offset..eocdl_64.offset]))
-            error.EocdrEocdl64UnderflowZeroed
+            err(ctx, .EocdrEocdl64UnderflowZeroed)
         else
-            error.EocdrEocdl64UnderflowBufferBleed;
+            err(ctx, .EocdrEocdl64UnderflowBufferBleed);
     }
 
     assert(!overflow(eocdr_64.offset, eocdr_64.length, eocdl_64.offset));
@@ -1276,29 +1309,29 @@ fn decodeEocdr64Upgrade(buffer: []const u8, header: *Eocdr) errors!void {
         header.cd_offset = eocdr_64.cd_offset;
     // Verify that all values are now in agreement between the EOCDR and EOCDR_64:
     if (header.disk != eocdr_64.disk)
-        return error.DiffEocdrDisk;
+        return err(ctx, .DiffEocdrDisk);
     if (header.cd_disk != eocdr_64.cd_disk)
-        return error.DiffEocdrCdDisk;
+        return err(ctx, .DiffEocdrCdDisk);
     if (header.cd_disk_records != eocdr_64.cd_disk_records)
-        return error.DiffEocdrCdDiskRecords;
+        return err(ctx, .DiffEocdrCdDiskRecords);
     if (header.cd_records != eocdr_64.cd_records)
-        return error.DiffEocdrCdRecords;
+        return err(ctx, .DiffEocdrCdRecords);
     if (header.cd_size != eocdr_64.cd_size)
-        return error.DiffEocdrCdSize;
+        return err(ctx, .DiffEocdrCdSize);
     if (header.cd_offset != eocdr_64.cd_offset)
-        return error.DiffEocdrCdOffset;
+        return err(ctx, .DiffEocdrCdOffset);
 
     header.zip64 = true;
     header.offset = eocdr_64.offset;
     header.length = eocdr_64.length + eocdl_64.length + header.length;
 }
 
-fn decodeEocdr(buffer: []const u8, offset: u64) errors!Eocdr {
+fn decodeEocdr(ctx: *Ctx, buffer: []const u8, offset: u64) Error!Eocdr {
     if (overflow(offset, zip_eocdr_min, buffer.len))
-        return error.EocdrOverflow;
+        return err(ctx, .EocdrOverflow);
     const buf = buffer[offset..];
     if (!mem.startsWith(u8, buf, Eocdr.signature))
-        return error.EocdrSignature;
+        return err(ctx, .EocdrSignature);
 
     // We consider header.offset to start at EOCDR_64 or EOCDR.
     // We consider header.length to include EOCDR_64, EOCDL_64 and EOCDR.
@@ -1318,13 +1351,13 @@ fn decodeEocdr(buffer: []const u8, offset: u64) errors!Eocdr {
     };
     header.length += header.comment_length;
     if (overflow(header.offset, header.length, buffer.len))
-        return error.EocdrCommentOverflow;
+        return err(ctx, .EocdrCommentOverflow);
     header.comment = buf[zip_eocdr_min..(zip_eocdr_min + header.comment_length)];
 
     // If we find an EOCDR_64 and EOCDL_64, we modify header.(offset, length):
     const length = zip_eocdr_min + header.comment_length;
     assert(header.length == length);
-    try decodeEocdr64Upgrade(buffer, &header);
+    try decodeEocdr64Upgrade(ctx, buffer, &header);
     if (header.zip64) {
         const length_64 = zip_eocdr_64_min + zip_eocdl_64;
         assert(header.length >= length + length_64);
@@ -1333,47 +1366,42 @@ fn decodeEocdr(buffer: []const u8, offset: u64) errors!Eocdr {
     }
 
     if (header.cd_size < header.cd_records * zip_cdh_min)
-        return error.EocdrSizeOverflow;
+        return err(ctx, .EocdrSizeOverflow);
     if (header.cd_size > 0 and header.cd_records == 0)
-        return error.EocdrSizeUnderflow;
+        return err(ctx, .EocdrSizeUnderflow);
     if (overflow(header.cd_offset, header.cd_size, header.offset))
-        return error.CdEocdrOverflow;
+        return err(ctx, .CdEocdrOverflow);
     if (header.disk != 0 or header.cd_disk != 0)
-        return error.MultipleDisks;
+        return err(ctx, .MultipleDisks);
     if (header.cd_disk_records != header.cd_records)
-        return error.EocdrRecords;
+        return err(ctx, .EocdrRecords);
     // The EOCDR has no General Purpose Bit Flag with which to indicate UTF-8.
     // Therefore, the comment encoding must always be CP437:
-    try verifyString(header.comment[0..header.comment_length], false);
+    try verifyString(ctx, header.comment[0..header.comment_length], false);
     const suffix_offset = header.offset + header.length;
     if (suffix_offset < buffer.len) {
         if (zeroes(buffer[suffix_offset..]))
-            return error.AppendedDataZeroed
+            return err(ctx, .AppendedDataZeroed)
         else
-            return error.AppendedDataBufferBleed;
+            return err(ctx, .AppendedDataBufferBleed);
     }
     return header;
 }
 
-fn inflateRaw(ctx: *const Ctx, compressed: []const u8, uncompressed: []u8) errors!void {
-    _ = ctx;
+fn inflateRaw(ctx: *Ctx, compressed: []const u8, uncompressed: []u8) Error!void {
     if (uncompressed.len == 0) return;
     var fbs = std.io.fixedBufferStream(compressed);
     var inflate = flate.decompressor(fbs.reader());
-    //defer inflate.deinit();
 
     // TODO(stephen): Migrate across the rest of the zlib errors?
-    inflate.reader().readNoEof(uncompressed) catch |err| switch (err) {
-        //error.CorruptInput => return error.InflateData,
-        //error.UnexpectedEndOfStream => return error.InflateStream,
-        //error.OutOfMemory => return error.InflateMemory,
-        error.EndOfStream => return error.InflateUncompressedUnderflow,
+    inflate.reader().readNoEof(uncompressed) catch |e| switch (e) {
+        error.EndOfStream => return err(ctx, .InflateUncompressedUnderflow),
         else => unreachable,
     };
 }
 
-fn locateEocdr(buffer: []const u8) errors!u64 {
-    if (buffer.len < zip_eocdr_min) return error.TooSmall;
+fn locateEocdr(ctx: *Ctx, buffer: []const u8) Error!u64 {
+    if (buffer.len < zip_eocdr_min) return err(ctx, .TooSmall);
     var index = @as(i64, @bitCast(buffer.len)) - zip_eocdr_min;
     // The EOCDR can be at most EOCDR_MIN plus a variable length comment.
     // The variable length of the comment can be at most a 16-bit integer.
@@ -1388,10 +1416,10 @@ fn locateEocdr(buffer: []const u8) errors!u64 {
         }
     }
 
-    return error.EocdrNotFound;
+    return err(ctx, .EocdrNotFound);
 }
 
-fn locateFirstLfh(buffer: []const u8, eocdr: *const Eocdr) errors!u64 {
+fn locateFirstLfh(ctx: *Ctx, buffer: []const u8, eocdr: *const Eocdr) Error!u64 {
     assert(buffer.len >= 8);
     // We expect a Local File Header or End Of Central Directory Record signature:
     // TODO(joran):
@@ -1417,25 +1445,25 @@ fn locateFirstLfh(buffer: []const u8, eocdr: *const Eocdr) errors!u64 {
     const search_limit = @min(buffer.len, 1024);
     if (mem.indexOf(u8, buffer[0..search_limit], string)) |prepended_data| {
         return if (zeroes(buffer[0..prepended_data]))
-            error.PrependedDataZeroed
+            err(ctx, .PrependedDataZeroed)
         else
-            error.PrependedDataBufferBleed;
+            err(ctx, .PrependedDataBufferBleed);
     }
 
     // We could not find any end to the prepended data:
-    return error.PrependedData;
+    return err(ctx, .PrependedData);
 }
 
 // Compare LFH against DDR:
-fn diffDdrLfh(ddr: *const Ddr, lfh: *const Lfh) errors!void {
+fn diffDdrLfh(ctx: *Ctx, ddr: *const Ddr, lfh: *const Lfh) Error!void {
     if (lfh.crc32 != 0 and lfh.crc32 != ddr.crc32)
-        return error.DiffLfhDdrCrc32;
+        return err(ctx, .DiffLfhDdrCrc32);
     if (lfh.compressed_size != 0 and
         lfh.compressed_size != ddr.compressed_size)
-        return error.DiffLfhDdrCompressedSize;
+        return err(ctx, .DiffLfhDdrCompressedSize);
     if (lfh.uncompressed_size != 0 and
         lfh.uncompressed_size != ddr.uncompressed_size)
-        return error.DiffLfhDdrUncompressedSize;
+        return err(ctx, .DiffLfhDdrUncompressedSize);
 }
 
 // Data which is optionally freed in deinit. Useful when a piece of data may be _either_ part of a larger buffer or not.
@@ -1454,7 +1482,7 @@ fn verifyData(
     buffer: []const u8,
     cdh: *Cdh,
     lfh: *Lfh,
-) errors!void {
+) Error!void {
     if (cdh.directory) {
         assert(cdh.compressed_size == 0);
         assert(cdh.uncompressed_size == 0);
@@ -1468,7 +1496,7 @@ fn verifyData(
             buffer[cdh.relative_offset + lfh.length + 0] == 3 and
             buffer[cdh.relative_offset + lfh.length + 1] == 0)
             return;
-        return error.AdNihilo;
+        return err(ctx, .AdNihilo);
     }
 
     assert(cdh.compressed_size > 0);
@@ -1478,16 +1506,17 @@ fn verifyData(
 
     // We verify the compression ratio here, after first checking for LFH overlap:
     // We do this to return zipBombFifield before zipBombRatio.
-    ctx.compressed_size = try math.add(u64, ctx.compressed_size, cdh.compressed_size);
-    ctx.uncompressed_size = try math.add(u64, ctx.uncompressed_size, cdh.uncompressed_size);
+    ctx.compressed_size = math.add(u64, ctx.compressed_size, cdh.compressed_size) catch return err(ctx, .Overflow);
+    ctx.uncompressed_size = math.add(u64, ctx.uncompressed_size, cdh.uncompressed_size) catch return err(ctx, .Overflow);
     try verifyCompressionRatio(
+        ctx,
         ctx.compressed_size,
         ctx.uncompressed_size,
     );
     var raw_wrapper: MaybeOwned = .{ .data = "" };
     defer raw_wrapper.deinit(ctx.allocator);
     if (cdh.compression_method == .deflate) {
-        const data = try ctx.allocator.alloc(u8, cdh.uncompressed_size);
+        const data = ctx.allocator.alloc(u8, cdh.uncompressed_size) catch return err(ctx, .OutOfMemory);
         errdefer ctx.allocator.free(data);
         try inflateRaw(
             ctx,
@@ -1509,7 +1538,7 @@ fn verifyData(
     assert(raw.len > 0);
 
     if (crc.hash(raw[0..cdh.uncompressed_size]) != cdh.crc32)
-        return error.Crc32;
+        return err(ctx, .Crc32);
 
     // TODO(joran):
     //  Check for common ZIP extensions in addition to PK signature.
@@ -1517,36 +1546,36 @@ fn verifyData(
         try zipMeta(ctx, raw[0..cdh.uncompressed_size]);
     } else {
         ctx.files += 1;
-        if (ctx.files > files_max) return error.BombFiles;
+        if (ctx.files > files_max) return err(ctx, .BombFiles);
     }
 }
 
-fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
+fn zipMeta(ctx: *Ctx, buffer: []const u8) Error!void {
     // Update and check context against limits:
     ctx.depth += 1;
-    if (ctx.depth > depth_max) return error.BombDepth;
+    if (ctx.depth > depth_max) return err(ctx, .BombDepth);
     ctx.files += 1;
-    if (ctx.files > files_max) return error.BombFiles;
+    if (ctx.files > files_max) return err(ctx, .BombFiles);
     ctx.archives += 1;
-    if (ctx.archives > archives_max) return error.BombArchives;
-    ctx.size = try math.add(u64, ctx.size, buffer.len);
-    if (ctx.size > size_max) return error.SizeMax;
+    if (ctx.archives > archives_max) return err(ctx, .BombArchives);
+    ctx.size = math.add(u64, ctx.size, buffer.len) catch return err(ctx, .Overflow);
+    if (ctx.size > size_max) return err(ctx, .SizeMax);
 
     // A zip file must contain at least an end of central directory record:
-    if (buffer.len < zip_eocdr_min) return error.TooSmall;
+    if (buffer.len < zip_eocdr_min) return err(ctx, .TooSmall);
     // ZIP64:
-    if (buffer.len > math.maxInt(u32) - 1) return error.Size4Gb;
+    if (buffer.len > math.maxInt(u32) - 1) return err(ctx, .Size4Gb);
     // Malicious archive signatures (almost certainly when masquerading as a ZIP):
-    if (mem.startsWith(u8, buffer, "Rar!\x1a\x07")) return error.Rar;
-    if (mem.startsWith(u8, buffer, "ustar")) return error.Tar;
-    if (mem.startsWith(u8, buffer, "xar!")) return error.Xar;
+    if (mem.startsWith(u8, buffer, "Rar!\x1a\x07")) return err(ctx, .Rar);
+    if (mem.startsWith(u8, buffer, "ustar")) return err(ctx, .Tar);
+    if (mem.startsWith(u8, buffer, "xar!")) return err(ctx, .Xar);
 
     // Locate and decode end of central directory record:
-    const offset = try locateEocdr(buffer);
-    var eocdr = try decodeEocdr(buffer, offset);
+    const offset = try locateEocdr(ctx, buffer);
+    var eocdr = try decodeEocdr(ctx, buffer, offset);
 
     // Locate the offset of the first local file header:
-    var lfh_offset = try locateFirstLfh(buffer, &eocdr);
+    var lfh_offset = try locateFirstLfh(ctx, buffer, &eocdr);
     assert(lfh_offset == 0 or lfh_offset == span_signature.len);
 
     // Compare central directory headers with local file headers:
@@ -1556,43 +1585,43 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
     var cdh_record: u64 = 0;
     while (cdh_record < eocdr.cd_records) {
         // Central Directory Header:
-        cdh = try decodeCdh(buffer, cdh_offset);
+        cdh = try decodeCdh(ctx, buffer, cdh_offset);
 
         if (lfh_offset > cdh.relative_offset) {
             if (cdh.directory and cdh.relative_offset == 0 and
                 cdh.crc32 == 0 and cdh.compressed_size == 0 and cdh.uncompressed_size == 0)
-                return error.DirectoryHasNoLfh;
-            return error.BombFifield;
+                return err(ctx, .DirectoryHasNoLfh);
+            return err(ctx, .BombFifield);
         }
 
         if (lfh_offset < cdh.relative_offset) {
             assert(cdh.relative_offset <= buffer.len);
             if (zeroes(buffer[lfh_offset..cdh.relative_offset]))
-                return error.LfhUnderflowZeroed
+                return err(ctx, .LfhUnderflowZeroed)
             else
-                return error.LfhUnderflowBufferBleed;
+                return err(ctx, .LfhUnderflowBufferBleed);
         }
 
         // Local File Header:
         assert(cdh.relative_offset == lfh_offset);
-        lfh = try decodeLfh(buffer, cdh.relative_offset);
-        try diffCdhAndLfh(cdh, lfh);
-        try verifySymlink(cdh, lfh, buffer);
+        lfh = try decodeLfh(ctx, buffer, cdh.relative_offset);
+        try diffCdhAndLfh(ctx, cdh, lfh);
+        try verifySymlink(ctx, cdh, lfh, buffer);
         assert(lfh.length >= zip_lfh_min);
         lfh_offset += lfh.length;
 
         // File Data (compressed or uncompressed):
-        lfh_offset = try math.add(u64, lfh_offset, cdh.compressed_size);
-        if (lfh_offset > buffer.len) return error.LfhDataOverflow;
+        lfh_offset = math.add(u64, lfh_offset, cdh.compressed_size) catch return err(ctx, .Overflow);
+        if (lfh_offset > buffer.len) return err(ctx, .LfhDataOverflow);
 
         // Data Descriptor Record (optional):
         if (lfh.gp_bits.lfh_fields_zeroed) {
-            const ddr = try decodeDdr(buffer, lfh_offset, lfh.zip64);
-            try diffCdhAndDdr(cdh, ddr);
-            try diffDdrLfh(&ddr, &lfh);
+            const ddr = try decodeDdr(ctx, buffer, lfh_offset, lfh.zip64);
+            try diffCdhAndDdr(ctx, cdh, ddr);
+            try diffDdrLfh(ctx, &ddr, &lfh);
             lfh_offset += ddr.length;
         }
-        if (lfh_offset > eocdr.cd_offset) return error.LfOverflow;
+        if (lfh_offset > eocdr.cd_offset) return err(ctx, .LfOverflow);
 
         // We descend into the data only after checking for LFH overlap above:
         // We can therefore descend only after decoding at least two entries.
@@ -1607,31 +1636,31 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
     // Descend into the previous CDH and LFH:
     if (cdh_record > 0)
         try verifyData(ctx, buffer, &cdh, &lfh);
-    if (lfh_offset > eocdr.cd_offset) return error.LfOverflow;
+    if (lfh_offset > eocdr.cd_offset) return err(ctx, .LfOverflow);
     if (lfh_offset < eocdr.cd_offset) {
         assert(eocdr.cd_offset <= buffer.len);
         if (zeroes(buffer[lfh_offset..eocdr.cd_offset]))
-            return error.LfUnderflowZeroed
+            return err(ctx, .LfUnderflowZeroed)
         else
-            return error.LfUnderflowBufferBleed;
+            return err(ctx, .LfUnderflowBufferBleed);
     }
 
     const cdh_offset_expected = eocdr.cd_offset + eocdr.cd_size;
-    if (cdh_offset > cdh_offset_expected) return error.CdOverflow;
+    if (cdh_offset > cdh_offset_expected) return err(ctx, .CdOverflow);
     if (cdh_offset < cdh_offset_expected) {
         assert(cdh_offset_expected <= buffer.len);
         if (zeroes(buffer[cdh_offset..cdh_offset_expected]))
-            return error.CdUnderflowZeroed
+            return err(ctx, .CdUnderflowZeroed)
         else
-            return error.CdUnderflowBufferBleed;
+            return err(ctx, .CdUnderflowBufferBleed);
     }
 
     if (cdh_offset < eocdr.offset) {
         assert(eocdr.offset <= buffer.len);
         if (zeroes(buffer[cdh_offset..eocdr.offset]))
-            return error.CdEocdrUnderflowZeroed
+            return err(ctx, .CdEocdrUnderflowZeroed)
         else
-            return error.CdEocdrUnderflowBufferBleed;
+            return err(ctx, .CdEocdrUnderflowBufferBleed);
     }
 
     assert(cdh_offset == eocdr.offset);
@@ -1640,7 +1669,10 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) errors!void {
     ctx.depth -= 1;
 }
 
-pub fn zip(buffer: []const u8, allocator: mem.Allocator) errors!void {
+pub const Options = struct {
+    diagnostics: ?*Diagnostics = null,
+};
+pub fn zip(buffer: []const u8, allocator: mem.Allocator, options: Options) Error!void {
     // SPEC: https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
 
     // Further, as per ISO/IEC 21320-1:2015, we disable support for:
@@ -1654,6 +1686,6 @@ pub fn zip(buffer: []const u8, allocator: mem.Allocator) errors!void {
     // Contrary to ISO/IEC 21320-1:2015, we do not require:
     // * `version needed to extract` to be at most 45 (too many false positives)
     // * bit 11 (UTF-8) when a string byte exceeds 0x7F (this could also be CP437)
-    var ctx = Ctx{ .allocator = allocator };
+    var ctx = Ctx{ .allocator = allocator, .diagnostics = options.diagnostics };
     return zipMeta(&ctx, buffer);
 }

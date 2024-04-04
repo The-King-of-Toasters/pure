@@ -35,8 +35,10 @@ fn writeEocdr(fbs: *FbsType, opts: TestOptions) void {
     writer.writeAll(opts.comment) catch unreachable;
 }
 
-fn testFailure(buf: []const u8, err: pure.errors) !void {
-    try testing.expectError(err, pure.zip(buf, testing.allocator));
+fn testFailure(buf: []const u8, err: pure.ErrorSubtype) !void {
+    var diags: pure.Diagnostics = .{};
+    try testing.expectError(error.ZipError, pure.zip(buf, testing.allocator, .{.diagnostics = &diags}));
+    try testing.expectEqual(err, diags.subtype);
 }
 
 test "foo" {
@@ -46,95 +48,95 @@ test "foo" {
 
     {
         writeEocdr(&fbs, .{});
-        try pure.zip(fbs.getWritten(), testing.allocator);
+        try pure.zip(fbs.getWritten(), testing.allocator, .{});
     }
     {
         writeEocdr(&fbs, .{});
-        try testFailure(fbs.getWritten()[0..21], error.TooSmall);
+        try testFailure(fbs.getWritten()[0..21], .TooSmall);
     }
     {
         const bytes = fmt.hexToBytes(
             &buf,
             "526172211a0700000000000000000000000000000000",
         ) catch unreachable;
-        try testFailure(bytes, error.Rar);
+        try testFailure(bytes, .Rar);
     }
     {
         const bytes = fmt.hexToBytes(
             &buf,
             "75737461720000000000000000000000000000000000",
         ) catch unreachable;
-        try testFailure(bytes, error.Tar);
+        try testFailure(bytes, .Tar);
     }
     {
         const bytes = fmt.hexToBytes(
             &buf,
             "78617221000000000000000000000000000000000000",
         ) catch unreachable;
-        try testFailure(bytes, error.Xar);
+        try testFailure(bytes, .Xar);
     }
     {
         writeEocdr(&fbs, .{ .signature = .{ 0x50, 0x4b, 0x05, 0x05 } });
-        try testFailure(fbs.getWritten(), error.EocdrNotFound);
+        try testFailure(fbs.getWritten(), .EocdrNotFound);
     }
     {
         writeEocdr(&fbs, .{ .records = 2, .size = 46 * 2 - 1 });
-        try testFailure(fbs.getWritten(), error.EocdrSizeOverflow);
+        try testFailure(fbs.getWritten(), .EocdrSizeOverflow);
     }
     {
         writeEocdr(&fbs, .{ .records = 2, .size = 46 * 2 - 1 });
-        try testFailure(fbs.getWritten(), error.EocdrSizeOverflow);
+        try testFailure(fbs.getWritten(), .EocdrSizeOverflow);
     }
     {
         writeEocdr(&fbs, .{ .records = 0, .size = 46 });
-        try testFailure(fbs.getWritten(), error.EocdrSizeUnderflow);
+        try testFailure(fbs.getWritten(), .EocdrSizeUnderflow);
     }
     {
         writeEocdr(&fbs, .{ .records = 1, .size = 46, .offset = 0 });
-        try testFailure(fbs.getWritten(), error.CdEocdrOverflow);
+        try testFailure(fbs.getWritten(), .CdEocdrOverflow);
     }
     {
         writeEocdr(&fbs, .{ .disk_records = 1, .records = 0 });
-        try testFailure(fbs.getWritten(), error.EocdrRecords);
+        try testFailure(fbs.getWritten(), .EocdrRecords);
     }
     {
         writeEocdr(&fbs, .{ .disk = 1 });
-        try testFailure(fbs.getWritten(), error.MultipleDisks);
+        try testFailure(fbs.getWritten(), .MultipleDisks);
     }
     {
         writeEocdr(&fbs, .{});
         writer.writeByteNTimes(0, 13) catch unreachable;
-        try testFailure(fbs.getWritten(), error.AppendedDataZeroed);
+        try testFailure(fbs.getWritten(), .AppendedDataZeroed);
         fbs.reset();
     }
     {
         writeEocdr(&fbs, .{ .reset_buffer = false });
         writer.writeByteNTimes(1, 97) catch unreachable;
-        try testFailure(fbs.getWritten(), error.AppendedDataBufferBleed);
+        try testFailure(fbs.getWritten(), .AppendedDataBufferBleed);
         fbs.reset();
     }
     {
         writeEocdr(&fbs, .{ .reset_buffer = false });
         writer.writeByteNTimes(1, 97) catch unreachable;
-        try testFailure(fbs.getWritten(), error.AppendedDataBufferBleed);
+        try testFailure(fbs.getWritten(), .AppendedDataBufferBleed);
         fbs.reset();
     }
     {
         writer.writeByteNTimes(1, 2048) catch unreachable;
         writeEocdr(&fbs, .{ .reset_buffer = false });
-        try testFailure(fbs.getWritten(), error.PrependedData);
+        try testFailure(fbs.getWritten(), .PrependedData);
         fbs.reset();
     }
     {
         writer.writeByteNTimes(1, 1) catch unreachable;
         writeEocdr(&fbs, .{ .reset_buffer = false });
-        try testFailure(fbs.getWritten(), error.PrependedDataBufferBleed);
+        try testFailure(fbs.getWritten(), .PrependedDataBufferBleed);
         fbs.reset();
     }
     {
         writer.writeByteNTimes(0, 1) catch unreachable;
         writeEocdr(&fbs, .{ .reset_buffer = false });
-        try testFailure(fbs.getWritten(), error.PrependedDataZeroed);
+        try testFailure(fbs.getWritten(), .PrependedDataZeroed);
         fbs.reset();
     }
 }
