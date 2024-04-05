@@ -4,7 +4,7 @@
     .dependencies = .{
         // Used for regression testing against C version of pure
         .zlib = .{
-            .url = "git+https://github.com/MFAshby/zig-build-zlib#f7f6262574fbfffd0202b4ad881a0cec1c7c189b",
+            .url = "https://github.com/MFAshby/zig-build-zlib/archive/f7f6262574fbfffd0202b4ad881a0cec1c7c189b.tar.gz",
             .hash = "1220a81facdcb6cb3676ac1189c35477540854d31c17d63cf3bdc8b94452f781d286",
         },
         // Used for regression testing, it has a folder of interestingly malformed ZIP files.
