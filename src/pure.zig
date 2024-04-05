@@ -185,6 +185,185 @@ pub const ErrorSubtype = enum {
     DirectoryHasNoLfh,
 };
 
+// General purpose Zip API
+pub const Zip = struct {
+    pub const FileKind = enum {
+        directory,
+        sym_link,
+        file,
+    };
+
+    pub const File = struct {
+        name: []const u8, // name of file, symlink or directory
+        link_name: []const u8, // target name of symlink
+        size: u64, // size of the file in bytes
+        mode: u32,
+        kind: FileKind,
+
+        _zip: *Zip,
+        _cdh: Cdh,
+        _fbs: std.io.FixedBufferStream([]const u8),
+        _fbsr: std.io.FixedBufferStream([]const u8).Reader,
+        _decomp: ?flate.inflate.Decompressor(.raw, std.io.FixedBufferStream([]const u8).Reader) = null,
+        _decompr: ?flate.inflate.Decompressor(.raw, std.io.FixedBufferStream([]const u8).Reader).Reader = null,
+
+        pub fn reader(self: File) !std.io.AnyReader {
+            if (self._cdh.compression_method == .deflate) {
+                return self._decompr.?.any();
+            } else {
+                return self._fbsr.any();
+            }
+        }
+
+        fn getContentUncompressed(self: File) ![]const u8 {
+            var ctx: Ctx = .{ .allocator = self._zip.allocator };
+            const lfh = try decodeLfh(&ctx, self._zip.buffer, self._cdh.relative_offset);
+            return self._zip.buffer[self._cdh.relative_offset + lfh.length ..][0..self._cdh.compressed_size];
+        }
+
+        fn from(z: *Zip, cdh: Cdh) !File {
+            const k: FileKind = if (cdh.directory)
+                .directory
+            else if ((cdh.unix_mode & S.IFMT) == S.IFLNK)
+                .sym_link
+            else
+                .file;
+            var file: File = .{
+                .name = cdh.file_name,
+                .link_name = "",
+                .size = cdh.uncompressed_size,
+                .mode = @intCast(cdh.unix_mode), // TODO (MFA) is cast right? Seems to be, we validate it's < max(u16) so it should be safe
+                .kind = k,
+                ._zip = z,
+                ._cdh = cdh,
+                ._fbs = undefined,
+                ._fbsr = undefined,
+            };
+            if (k == .sym_link) {
+                file.link_name = try file.getContentUncompressed();
+            }
+            file._fbs = std.io.fixedBufferStream(try file.getContentUncompressed());
+            file._fbsr = file._fbs.reader();
+            if (cdh.compression_method == .deflate) {
+                file._decomp = flate.decompressor(file._fbsr);
+                file._decompr = file._decomp.?.reader();
+            }
+            return file;
+        }
+    };
+    pub const Iterator = struct {
+        zip: *Zip,
+        index: usize = 0,
+        pub fn next(self: *Iterator) !?File {
+            const values = self.zip.directory.values();
+            if (self.index >= values.len) return null;
+            const cdh = values[self.index];
+            const f = try File.from(self.zip, cdh);
+            self.index += 1;
+            return f;
+        }
+    };
+    const InitOptions = struct { diagnostics: ?*Diagnostics = null };
+
+    allocator: std.mem.Allocator,
+    buffer: []align(mem.page_size) const u8,
+    directory: std.StringArrayHashMap(Cdh),
+
+    pub fn init(a: std.mem.Allocator, file: std.fs.File, opts: InitOptions) !Zip {
+        const stat = try file.stat();
+        const buffer = try std.posix.mmap(null, stat.size, std.posix.PROT.READ, std.posix.MAP{ .TYPE = .PRIVATE }, file.handle, 0);
+        errdefer {
+            std.posix.munmap(buffer);
+        }
+        // Read the central directory
+        var directory = std.StringArrayHashMap(Cdh).init(a);
+        errdefer {
+            directory.deinit();
+        }
+        var ctx: Ctx = .{
+            .allocator = a,
+            .directory = &directory,
+            .do_decompress = false,
+            .diagnostics = opts.diagnostics,
+        };
+        try zipMeta(&ctx, buffer);
+        return .{
+            .allocator = a,
+            .buffer = buffer,
+            .directory = directory,
+        };
+    }
+
+    pub fn deinit(self: *Zip) void {
+        self.directory.deinit();
+        std.posix.munmap(self.buffer);
+    }
+
+    pub fn get(self: *Zip, subpath: []const u8) !?File {
+        const cdh = self.directory.get(subpath) orelse return null;
+        return try File.from(self, cdh);
+    }
+
+    pub fn iterator(self: *Zip) Iterator {
+        return .{ .zip = self };
+    }
+};
+
+test "open ZIP read file name" {
+    const a = std.testing.allocator;
+    const f = try std.fs.cwd().openFile("src/testdata/twofiles.zip", .{});
+    var z = try Zip.init(a, f, .{});
+    defer z.deinit();
+    const zf = try z.get("README.md") orelse return error.FileNotFound;
+    try std.testing.expectEqual(2064, zf.size);
+}
+
+test "open a ZIP with symlink" {
+    const a = std.testing.allocator;
+    const f = try std.fs.cwd().openFile("src/testdata/symlink.zip", .{});
+    var z = try Zip.init(a, f, .{});
+    defer z.deinit();
+    const symlink = try z.get("README-link.md") orelse return error.FileNotFound;
+    try std.testing.expectEqual(.sym_link, symlink.kind);
+    try std.testing.expectEqualStrings("README.md", symlink.link_name);
+}
+
+test "open a ZIP with a directory" {
+    const a = std.testing.allocator;
+    const f = try std.fs.cwd().openFile("src/testdata/directory.zip", .{});
+    var z = try Zip.init(a, f, .{});
+    defer z.deinit();
+    const dir = try z.get("src/") orelse return error.FileNotFound;
+    try std.testing.expectEqual(.directory, dir.kind);
+}
+
+test "iterate ZIP entries" {
+    const a = std.testing.allocator;
+    const f = try std.fs.cwd().openFile("src/testdata/twofiles.zip", .{});
+    var z = try Zip.init(a, f, .{});
+    defer z.deinit();
+    var it = z.iterator();
+    const f1 = try it.next() orelse return error.FileNotFound;
+    const f2 = try it.next() orelse return error.FileNotFound;
+    const f3 = try it.next();
+    try std.testing.expectEqualStrings("README.md", f1.name);
+    try std.testing.expectEqualStrings("README-original.md", f2.name);
+    try std.testing.expectEqual(null, f3);
+}
+
+test "read a ZIP entry contents" {
+    const a = std.testing.allocator;
+    const f = try std.fs.cwd().openFile("src/testdata/twofiles.zip", .{});
+    var z = try Zip.init(a, f, .{});
+    defer z.deinit();
+    const f1 = try z.get("README.md") orelse return error.FileNotFound;
+    var rdr1 = try f1.reader();
+    const f1c = try rdr1.readAllAlloc(a, 1_000_000);
+    defer a.free(f1c);
+    try std.testing.expect(std.mem.startsWith(u8, f1c, "# Pure, the Zig port"));
+    try std.testing.expect(std.mem.endsWith(u8, f1c, "- Anything else marked `TODO` in the code.\n"));
+}
+
 const path_component_max = 255;
 const path_max = 4096;
 const malloc_min = 65536;
@@ -247,7 +426,14 @@ const Ctx = struct {
     size: u64 = 0,
     compressed_size: u64 = 0,
     uncompressed_size: u64 = 0,
-    diagnostics: ?*Diagnostics,
+
+    // Set to false if you want to skip decompressing the contents to verify content lengths
+    // NOTE also disables checking nested ZIP meta
+    do_decompress: bool = true,
+    // Populate this this if you want more detailed errors
+    diagnostics: ?*Diagnostics = null,
+    // Populate this if you want to collect the central directory entries for further processing
+    directory: ?*std.StringArrayHashMap(Cdh) = null,
 };
 
 const LocalFileHeader = struct {
@@ -1388,16 +1574,26 @@ fn decodeEocdr(ctx: *Ctx, buffer: []const u8, offset: u64) Error!Eocdr {
     return header;
 }
 
-fn inflateRaw(ctx: *Ctx, compressed: []const u8, uncompressed: []u8) Error!void {
-    if (uncompressed.len == 0) return;
+// Returns the crc32 hash of the uncompressed data
+fn inflateRaw(ctx: *Ctx, compressed: []const u8, expected_len: usize, writer: anytype) Error!u32 {
+    var hash = crc.init();
+    if (expected_len == 0) return hash.final();
+
     var fbs = std.io.fixedBufferStream(compressed);
     var inflate = flate.decompressor(fbs.reader());
-
     // TODO(stephen): Migrate across the rest of the zlib errors?
-    inflate.reader().readNoEof(uncompressed) catch |e| switch (e) {
-        error.EndOfStream => return err(ctx, .InflateUncompressedUnderflow),
-        else => unreachable,
-    };
+    var reader = inflate.reader();
+    var ct: usize = 0;
+
+    const bufsz = std.mem.page_size;
+    var buf: [bufsz]u8 = .{0} ** bufsz;
+    while (ct < expected_len) {
+        const sz = reader.read(&buf) catch return err(ctx, .InflateUncompressedUnderflow);
+        writer.writeAll(buf[0..sz]) catch return err(ctx, .OutOfMemory); // TODO (MFA) new error code?
+        hash.update(buf[0..sz]);
+        ct += sz;
+    }
+    return hash.final();
 }
 
 fn locateEocdr(ctx: *Ctx, buffer: []const u8) Error!u64 {
@@ -1513,37 +1709,43 @@ fn verifyData(
         ctx.compressed_size,
         ctx.uncompressed_size,
     );
-    var raw_wrapper: MaybeOwned = .{ .data = "" };
-    defer raw_wrapper.deinit(ctx.allocator);
+
+    // This next part is expensive (inflating the whole zip contents) so we might skip it
+    if (!ctx.do_decompress) return;
+
+    const entry_bytes = buffer[cdh.relative_offset + lfh.length ..][0..cdh.compressed_size];
+
+    // peek just the first two bytes to check if the entry is a zip
+    var peek: [2]u8 = .{ 0, 0 };
+    var hash: u64 = undefined;
     if (cdh.compression_method == .deflate) {
-        const data = ctx.allocator.alloc(u8, cdh.uncompressed_size) catch return err(ctx, .OutOfMemory);
-        errdefer ctx.allocator.free(data);
-        try inflateRaw(
+        var fbs = std.io.fixedBufferStream(&peek);
+        var cw = ChainWriter{ .writers = &.{ fbs.writer().any(), std.io.null_writer.any() } };
+        hash = try inflateRaw(
             ctx,
-            buffer[cdh.relative_offset + lfh.length ..][0..cdh.compressed_size],
-            data,
+            entry_bytes,
+            cdh.uncompressed_size,
+            cw.writer(),
         );
-        raw_wrapper = .{
-            .data = data,
-            .owned = true,
-        };
     } else {
         assert(cdh.compression_method == .uncompressed);
-        raw_wrapper = .{
-            .data = buffer[cdh.relative_offset + lfh.length ..],
-            .owned = false,
-        };
+        if (entry_bytes.len >= 2) {
+            peek = .{ entry_bytes[0], entry_bytes[1] };
+        }
+        hash = crc.hash(entry_bytes);
     }
-    var raw: []const u8 = raw_wrapper.data;
-    assert(raw.len > 0);
 
-    if (crc.hash(raw[0..cdh.uncompressed_size]) != cdh.crc32)
+    if (hash != cdh.crc32)
         return err(ctx, .Crc32);
 
     // TODO(joran):
     //  Check for common ZIP extensions in addition to PK signature.
-    if (mem.startsWith(u8, raw, "PK")) {
-        try zipMeta(ctx, raw[0..cdh.uncompressed_size]);
+    if (mem.startsWith(u8, &peek, "PK")) {
+        var bytes = ctx.allocator.alloc(u8, cdh.uncompressed_size) catch return err(ctx, .OutOfMemory);
+        defer ctx.allocator.free(bytes);
+        var fbs = std.io.fixedBufferStream(bytes);
+        _ = try inflateRaw(ctx, entry_bytes, cdh.uncompressed_size, fbs.writer());
+        try zipMeta(ctx, bytes[0..cdh.uncompressed_size]);
     } else {
         ctx.files += 1;
         if (ctx.files > files_max) return err(ctx, .BombFiles);
@@ -1631,6 +1833,14 @@ fn zipMeta(ctx: *Ctx, buffer: []const u8) Error!void {
         assert(cdh.length >= zip_cdh_min);
         cdh_offset += cdh.length;
         cdh_record += 1;
+
+        if (ctx.directory) |dir| {
+            // TODO (MFA) should I clone the cdh? It's pointer fields are pointers into
+            // the buffer, which might be a memory mapped region. IDK how efficient this will be when
+            // entries could be quite far apart (although typically I expect the central directory
+            // will all end up in the file system cache on sane file system implementations)
+            dir.put(cdh.file_name, cdh) catch return err(ctx, .OutOfMemory);
+        }
     }
 
     // Descend into the previous CDH and LFH:
@@ -1689,3 +1899,30 @@ pub fn zip(buffer: []const u8, allocator: mem.Allocator, options: Options) Error
     var ctx = Ctx{ .allocator = allocator, .diagnostics = options.diagnostics };
     return zipMeta(&ctx, buffer);
 }
+
+// Write to one stream until NoSpaceLeft, then move onto the next and so on.
+
+const ChainWriter = struct {
+    const WriteError = std.io.AnyWriter.Error;
+    const Writer = std.io.Writer(*ChainWriter, anyerror, ChainWriter.write);
+    writers: []const std.io.AnyWriter,
+    ix: usize = 0,
+
+    pub fn writer(self: *ChainWriter) Writer {
+        return .{
+            .context = self,
+        };
+    }
+    fn write(self: *ChainWriter, bytes: []const u8) WriteError!usize {
+        if (self.ix >= self.writers.len) return error.NoSpaceLeft;
+        var wtr = self.writers[self.ix];
+        const written = wtr.write(bytes) catch |e| switch (e) {
+            error.NoSpaceLeft => {
+                self.ix += 1;
+                return 0;
+            },
+            else => return e,
+        };
+        return written;
+    }
+};
