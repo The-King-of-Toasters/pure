@@ -183,6 +183,175 @@ pub const ErrorSubtype = enum {
     Eief64UnderflowBufferBleed,
     Eief64Lfh,
     DirectoryHasNoLfh,
+
+    pub fn message(self: ErrorSubtype) []const u8 {
+        return switch (self) {
+            .SizeMax => "exceeded 64 GB limit",
+            .OutOfMemory => "insufficient memory",
+            .Overflow => "string not found",
+            .BombArchives => "uint64_t overflow",
+            .BombDepth => "zip bomb: too many archives",
+            .BombFifield => "zip bomb: too much recursion",
+            .BombFiles => "zip bomb: local file header overlap (see research by David Fifield)",
+            .BombRatio => "zip bomb: too many files",
+            .BombInflateCompressedOverflow => "zip bomb: dangerous compression ratio and uncompressed size",
+            .BombInflateUncompressedOverflow => "zip bomb: compressed data is larger than compressed size (overflow)",
+            .TooSmall => "zip bomb: uncompressed data is larger than uncompressed size (overflow)",
+            .Size4Gb => "zip file too small (minimum size is 22 bytes)",
+            .Rar => "unsupported: zip file exceeds 4 GB limit (ZIP64)",
+            .Tar => "not a zip file (malicious rar)",
+            .Xar => "not a zip file (malicious tar)",
+            .Signature => "not a zip file (malicious xar)",
+            .EocdrNotFound => "not a zip file (bad signature)",
+            .EocdrOverflow => "end of central directory record: not found",
+            .EocdrCommentOverflow => "end of central directory record: overflow",
+            .EocdrSignature => "end of central directory record: comment overflow",
+            .EocdrRecords => "end of central directory record: bad signature",
+            .EocdrSizeOverflow => "end of central directory record: cd_disk_records != cd_records",
+            .EocdrSizeUnderflow => "end of central directory record: cd_size too small for number of cd_records",
+            .MultipleDisks => "end of central directory record: cd_size > 0 but cd_records == 0",
+            .AppendedDataZeroed => "unsupported: multiple disks",
+            .AppendedDataBufferBleed => "zip file has appended data (zeroed)",
+            .PrependedData => "zip file has appended data (buffer bleed)",
+            .PrependedDataZeroed => "zip file has prepended data",
+            .PrependedDataBufferBleed => "zip file has prepended data (zeroed)",
+            .CdhOverflow => "zip file has prepended data (buffer bleed)",
+            .CdhSignature => "central directory header: overflow",
+            .CdhRelativeOffsetOverflow => "central directory header: bad signature",
+            .CdhRelativeOffsetOverlap => "central directory header: relative offset overflow",
+            .CdhFileNameOverflow => "central directory header: relative offset overlaps central directory",
+            .CdhExtraFieldOverflow => "central directory header: file name overflow",
+            .CdhFileCommentOverflow => "central directory header: extra field overflow",
+            .LfhOverflow => "central directory header: file comment overflow",
+            .LfhSignature => "local file header: overflow",
+            .LfhFileNameOverflow => "local file header: bad signature",
+            .LfhExtraFieldOverflow => "local file header: file name overflow",
+            .LfhUnderflowZeroed => "local file header: extra field overflow",
+            .LfhUnderflowBufferBleed => "local file header: gap (zeroed)",
+            .LfhDataOverflow => "local file header: gap (buffer bleed)",
+            .DdrOverflow => "local file header: data overflow",
+            .LfOverflow => "data descriptor record: overflow",
+            .LfUnderflowZeroed => "zip file has overlap between last local file and central directory",
+            .LfUnderflowBufferBleed => "zip file has gap between last local file and central directory (zeroed)",
+            .CdOverflow => "zip file has gap between last local file and central directory (buffer bleed)",
+            .CdUnderflowZeroed => "central directory: overflow",
+            .CdUnderflowBufferBleed => "central directory: underflow (zeroed)",
+            .CdEocdrOverflow => "central directory: underflow (buffer bleed)",
+            .CdEocdrUnderflowZeroed => "central directory overlaps end of central directory record",
+            .CdEocdrUnderflowBufferBleed => "zip file has gap between central directory and end of central directory record (zeroed)",
+            .DiffLfhGeneralPurposeBitFlag => "zip file has gap between central directory and end of central directory record (buffer bleed)",
+            .DiffLfhCompressionMethod => "local file header diverges from central directory header: general purpose bit flag",
+            .DiffLfhLastModFileTime => "local file header diverges from central directory header: compression method",
+            .DiffLfhLastModFileDate => "local file header diverges from central directory header: last mod file time",
+            .DiffLfhCrc32 => "local file header diverges from central directory header: last mod file date",
+            .DiffLfhCompressedSize => "local file header diverges from central directory header: crc32",
+            .DiffLfhUncompressedSize => "local file header diverges from central directory header: compressed size",
+            .DiffLfhFileNameLength => "local file header diverges from central directory header: uncompressed size",
+            .DiffLfhFileName => "local file header diverges from central directory header: file name length",
+            .DiffLfhDdrCrc32 => "local file header diverges from central directory header: file name",
+            .DiffLfhDdrCompressedSize => "local file header diverges from data descriptor record: crc32",
+            .DiffLfhDdrUncompressedSize => "local file header diverges from data descriptor record: compressed size",
+            .DiffDdrCrc32 => "local file header diverges from data descriptor record: uncompressed size",
+            .DiffDdrCompressedSize => "data descriptor record diverges from central directory header: crc32",
+            .DiffDdrUncompressedSize => "data descriptor record diverges from central directory header: compressed size",
+            .FlagOverflow => "data descriptor record diverges from central directory header: uncompressed size",
+            .FlagTraditionalEncryption => "general purpose bit flag: 16-bit overflow",
+            .FlagEnhancedDeflate => "unsupported: traditional encryption",
+            .FlagCompressedPatchedData => "unsupported: enhanced deflate",
+            .FlagStrongEncryption => "unsupported: compressed patched data",
+            .FlagUnusedBit7 => "unsupported: strong encryption",
+            .FlagUnusedBit8 => "unsupported: unused flag (bit 7)",
+            .FlagUnusedBit9 => "unsupported: unused flag (bit 8)",
+            .FlagUnusedBit10 => "unsupported: unused flag (bit 9)",
+            .FlagEnhancedCompression => "unsupported: unused flag (bit 10)",
+            .FlagMaskedLocalHeaders => "unsupported: enhanced compression",
+            .FlagReservedBit14 => "unsupported: masked local headers",
+            .FlagReservedBit15 => "unsupported: reserved flag (bit 14)",
+            .CompressionMethodDangerous => "unsupported: reserved flag (bit 15)",
+            .CompressionMethodEncrypted => "compression method: exceeds 999 (CVE-2016-9844)",
+            .CompressionMethodUnsupported => "compression method: encrypted",
+            .StoredCompressionSizeMismatch => "compression method: must be 0 or 8",
+            .DangerousNegativeCompressionRatio => "file stored with no compression has mismatching compressed and uncompressed sizes",
+            .TimeOverflow => "dangerous negative compression ratio (CVE-2018-18384)",
+            .TimeHourOverflow => "time: 16-bit overflow",
+            .TimeMinuteOverflow => "time: ms-dos hour: overflow",
+            .TimeSecondOverflow => "time: ms-dos minute: overflow",
+            .DateOverflow => "time: ms-dos second: overflow",
+            .DateYearOverflow => "date: 16-bit overflow",
+            .DateMonthOverflow => "date: ms-dos year: overflow",
+            .DateDayOverflow => "date: ms-dos month: overflow",
+            .FileNameLength => "date: ms-dos day: overflow",
+            .FileNameControlCharacters => "file name exceeds 4096 bytes (CVE-2018-1000035)",
+            .FileNameTraversalDrivePath => "file name contains control characters (CVE-2003-0282)",
+            .FileNameTraversalRelativePath => "directory traversal (via file name drive path)",
+            .FileNameTraversalDoubleDots => "directory traversal (via file name relative path)",
+            .FileNameComponentOverflow => "directory traversal (via file name double dots)",
+            .FileNameBackslash => "file name path component exceeds 255 bytes",
+            .ExtraFieldMax => "file name contains backslash",
+            .ExtraFieldMin => "extra field length exceeds maximum",
+            .ExtraFieldAttributeOverflow => "extra field length must be 0 or at least 4 bytes",
+            .ExtraFieldOverflow => "extra field: attribute overflow",
+            .ExtraFieldUnderflowZeroed => "extra field: overflow",
+            .ExtraFieldUnderflowBufferBleed => "extra field: underflow (zeroed)",
+            .ExtraFieldUnicodePathOverflow => "extra field: underflow (buffer bleed)",
+            .ExtraFieldUnicodePathVersion => "extra field: unicode path overflow",
+            .ExtraFieldUnicodePathDiff => "extra field: unicode path has an invalid version",
+            .UnixModeOverflow => "extra field: unicode path diverges from file name",
+            .UnixModeBlockDevice => "unix mode: overflow",
+            .UnixModeCharacterDevice => "unix mode: dangerous type (block device)",
+            .UnixModeFifo => "unix mode: dangerous type (character device)",
+            .UnixModeSocket => "unix mode: dangerous type (fifo)",
+            .UnixModePermissionsSticky => "unix mode: dangerous type (socket)",
+            .UnixModePermissionsSetgid => "unix mode: dangerous permissions (sticky)",
+            .UnixModePermissionsSetuid => "unix mode: dangerous permissions (setgid)",
+            .DirectoryCompressed => "unix mode: dangerous permissions (setuid)",
+            .DirectoryUncompressed => "directory: non-zero compressed size",
+            .SymlinkCompressed => "directory: non-zero uncompressed size",
+            .SymlinkLength => "unsupported: compressed symlink",
+            .SymlinkControlCharacters => "symlink exceeds 4096 bytes (CVE-2018-1000035)",
+            .SymlinkTraversalDrivePath => "symlink contains control characters (CVE-2003-0282)",
+            .SymlinkTraversalRelativePath => "directory traversal (via symlink drive path)",
+            .SymlinkTraversalDoubleDots => "directory traversal (via symlink relative path)",
+            .SymlinkComponentOverflow => "directory traversal (via symlink double dots)",
+            .StringInvalidUnicode => "symlink path component exceeds 255 bytes",
+            .StringMax => "string exceeds reasonable limit (PURE_ZIP_STRING_MAX)",
+            .StringNullByte => "string contains a dangerous null byte",
+            .Inflate => "zip file could not be uncompressed",
+            .InflateDictionary => "zip file could not be uncompressed (dictionary error)",
+            .InflateStream => "zip file could not be uncompressed (stream error)",
+            .InflateData => "zip file could not be uncompressed (data error)",
+            .InflateMemory => "zip file could not be uncompressed (memory error)",
+            .InflateCompressedUnderflow => "compressed data is smaller than compressed size",
+            .InflateUncompressedUnderflow => "uncompressed data is smaller than uncompressed size",
+            .AdNihilo => "file has a zero uncompressed size but a non-zero compressed size or invalid compressed data (ad nihilo)",
+            .ExNihilo => "file has a zero compressed size but a non-zero uncompressed size (ex nihilo)",
+            .Crc32 => "file is corrupt or has an invalid crc32 checksum",
+            .Eocdl64Overflow => "zip64 end of central directory locator: overflow",
+            .Eocdl64Signature => "zip64 end of central directory locator: bad signature",
+            .Eocdl64NegativeOffset => "zip64 end of central directory locator: negative offset",
+            .Eocdl64Disk => "zip64 end of central directory locator: disk != 0",
+            .Eocdl64Disks => "zip64 end of central directory locator: disks > 1",
+            .Eocdr64Overflow => "zip64 end of central directory record: overflow",
+            .Eocdr64Signature => "zip64 end of central directory record: bad signature",
+            .EocdrEocdl64Overflow => "zip64 eocdr overlaps zip64 eocdl",
+            .EocdrEocdl64UnderflowZeroed => "gap between zip64 eocdr and zip64 eocdl (zeroed)",
+            .EocdrEocdl64UnderflowBufferBleed => "gap between zip64 eocdr and zip64 eocdl (buffer bleed)",
+            .DiffEocdrDisk => "eocdr diverges from zip64 eocdr: disk",
+            .DiffEocdrCdDisk => "eocdr diverges from zip64 eocdr: cd_disk",
+            .DiffEocdrCdDiskRecords => "eocdr diverges from zip64 eocdr: cd_disk_records",
+            .DiffEocdrCdRecords => "eocdr diverges from zip64 eocdr: cd_records",
+            .DiffEocdrCdSize => "eocdr diverges from zip64 eocdr: cd_size",
+            .DiffEocdrCdOffset => "eocdr diverges from zip64 eocdr: cd_offset",
+            .Eief64CompressedSize => "zip64 extended information extra field: missing compressed_size",
+            .Eief64Disk => "zip64 extended information extra field: missing disk",
+            .Eief64RelativeOffset => "zip64 extended information extra field: missing relative_offset",
+            .Eief64UncompressedSize => "zip64 extended information extra field: missing uncompressed_size",
+            .Eief64UnderflowZeroed => "zip64 extended information extra field: appended data (zeroed)",
+            .Eief64UnderflowBufferBleed => "zip64 extended information extra field: appended data (buffer bleed)",
+            .Eief64Lfh => "zip64 extended information extra field: local file header must include both uncompressed_size and compressed_size",
+            .DirectoryHasNoLfh => "a directory has no local file header",
+        };
+    }
 };
 
 // General purpose Zip API
@@ -1926,3 +2095,142 @@ const ChainWriter = struct {
         return written;
     }
 };
+
+const TestOptions = struct {
+    signature: [4]u8 = .{ 0x50, 0x4b, 0x05, 0x06 },
+    disk: u16 = 0,
+    disk_records: u16 = 0,
+    records: u16 = 0,
+    size: u32 = 0,
+    offset: u32 = 0,
+    comment: []const u8 = "",
+    reset_buffer: bool = true,
+};
+
+const FbsType = std.io.FixedBufferStream([]u8);
+
+fn writeEocdr(fbs: *FbsType, opts: TestOptions) void {
+    if (opts.reset_buffer)
+        fbs.reset();
+    const writer = fbs.writer();
+
+    writer.writeAll(&opts.signature) catch unreachable;
+    writer.writeInt(u16, 0, .little) catch unreachable; // disk
+    writer.writeInt(u16, opts.disk, .little) catch unreachable; // cd_disk
+    writer.writeInt(u16, opts.disk_records, .little) catch unreachable; // cd_disk_records
+    writer.writeInt(u16, opts.records, .little) catch unreachable; // cd_records
+    writer.writeInt(u32, opts.size, .little) catch unreachable; // cd_size
+    writer.writeInt(u32, opts.offset, .little) catch unreachable; // cd_offset
+    writer.writeInt(u16, @intCast(opts.comment.len), .little) catch unreachable;
+    writer.writeAll(opts.comment) catch unreachable;
+}
+
+fn testFailure(buf: []const u8, e: ErrorSubtype) !void {
+    var diags: Diagnostics = .{};
+    try std.testing.expectError(error.ZipError, zip(buf, std.testing.allocator, .{ .diagnostics = &diags }));
+    try std.testing.expectEqual(e, diags.subtype);
+}
+
+test "foo" {
+    var buf = mem.zeroes([4096]u8);
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    {
+        writeEocdr(&fbs, .{});
+        try zip(fbs.getWritten(), std.testing.allocator, .{});
+    }
+    {
+        writeEocdr(&fbs, .{});
+        try testFailure(fbs.getWritten()[0..21], .TooSmall);
+    }
+    {
+        const bytes = std.fmt.hexToBytes(
+            &buf,
+            "526172211a0700000000000000000000000000000000",
+        ) catch unreachable;
+        try testFailure(bytes, .Rar);
+    }
+    {
+        const bytes = std.fmt.hexToBytes(
+            &buf,
+            "75737461720000000000000000000000000000000000",
+        ) catch unreachable;
+        try testFailure(bytes, .Tar);
+    }
+    {
+        const bytes = std.fmt.hexToBytes(
+            &buf,
+            "78617221000000000000000000000000000000000000",
+        ) catch unreachable;
+        try testFailure(bytes, .Xar);
+    }
+    {
+        writeEocdr(&fbs, .{ .signature = .{ 0x50, 0x4b, 0x05, 0x05 } });
+        try testFailure(fbs.getWritten(), .EocdrNotFound);
+    }
+    {
+        writeEocdr(&fbs, .{ .records = 2, .size = 46 * 2 - 1 });
+        try testFailure(fbs.getWritten(), .EocdrSizeOverflow);
+    }
+    {
+        writeEocdr(&fbs, .{ .records = 2, .size = 46 * 2 - 1 });
+        try testFailure(fbs.getWritten(), .EocdrSizeOverflow);
+    }
+    {
+        writeEocdr(&fbs, .{ .records = 0, .size = 46 });
+        try testFailure(fbs.getWritten(), .EocdrSizeUnderflow);
+    }
+    {
+        writeEocdr(&fbs, .{ .records = 1, .size = 46, .offset = 0 });
+        try testFailure(fbs.getWritten(), .CdEocdrOverflow);
+    }
+    {
+        writeEocdr(&fbs, .{ .disk_records = 1, .records = 0 });
+        try testFailure(fbs.getWritten(), .EocdrRecords);
+    }
+    {
+        writeEocdr(&fbs, .{ .disk = 1 });
+        try testFailure(fbs.getWritten(), .MultipleDisks);
+    }
+    {
+        writeEocdr(&fbs, .{});
+        writer.writeByteNTimes(0, 13) catch unreachable;
+        try testFailure(fbs.getWritten(), .AppendedDataZeroed);
+        fbs.reset();
+    }
+    {
+        writeEocdr(&fbs, .{ .reset_buffer = false });
+        writer.writeByteNTimes(1, 97) catch unreachable;
+        try testFailure(fbs.getWritten(), .AppendedDataBufferBleed);
+        fbs.reset();
+    }
+    {
+        writeEocdr(&fbs, .{ .reset_buffer = false });
+        writer.writeByteNTimes(1, 97) catch unreachable;
+        try testFailure(fbs.getWritten(), .AppendedDataBufferBleed);
+        fbs.reset();
+    }
+    {
+        writer.writeByteNTimes(1, 2048) catch unreachable;
+        writeEocdr(&fbs, .{ .reset_buffer = false });
+        try testFailure(fbs.getWritten(), .PrependedData);
+        fbs.reset();
+    }
+    {
+        writer.writeByteNTimes(1, 1) catch unreachable;
+        writeEocdr(&fbs, .{ .reset_buffer = false });
+        try testFailure(fbs.getWritten(), .PrependedDataBufferBleed);
+        fbs.reset();
+    }
+    {
+        writer.writeByteNTimes(0, 1) catch unreachable;
+        writeEocdr(&fbs, .{ .reset_buffer = false });
+        try testFailure(fbs.getWritten(), .PrependedDataZeroed);
+        fbs.reset();
+    }
+}
+
+test {
+    _ = @import("regress.zig");
+}

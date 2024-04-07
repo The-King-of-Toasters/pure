@@ -4,22 +4,15 @@ const posix = std.posix;
 const mem = std.mem;
 const log = std.log;
 
-const pure = @import("pure.zig");
+const pure = @import("root.zig");
 const regress = @import("regress");
 
 const rlog = log.scoped(.regress);
 
 // Runs a regression test of C version of pure against Zig version
 // Using libzip regression testing set.
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{
-        // .enable_memory_limit = true,
-        // .never_unmap = true,
-        // .retain_metadata = true,
-    }){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
+test "regression" {
+    const allocator = std.testing.allocator;
     var dir = try std.fs.openDirAbsolute(regress.regression_zip_dir, .{ .iterate = true });
     var walker = try dir.walk(allocator);
     defer walker.deinit();

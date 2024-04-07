@@ -4,27 +4,28 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const pure = b.addStaticLibrary(.{
+    // pure Zig library
+    _ = b.addModule("pure", .{ .root_source_file = .{ .path = "src/root.zig" } });
+
+    // pure Zig CLI
+    const exe = b.addExecutable(.{
         .name = "pure",
-        .root_source_file = .{ .path = "src/pure.zig" },
         .target = target,
         .optimize = optimize,
+        .root_source_file = .{ .path = "src/main.zig" },
     });
-    b.installArtifact(pure);
+    b.installArtifact(exe);
+    const run_exe = b.addRunArtifact(exe);
+    if (b.args) |args| {
+        run_exe.addArgs(args);
+    }
+    const run_step = b.step("run", "Run pure CLI");
+    run_step.dependOn(&run_exe.step);
 
-    const unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/test.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-    const run_unit_tests = b.addRunArtifact(unit_tests);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
-
+    // C library depends on zlib
     const zlib = b.dependency("zlib", .{ .target = target, .optimize = optimize });
-    const libz = zlib.artifact("z");
 
+    // original pure C library
     const pure_c = b.addStaticLibrary(.{
         .name = "purec",
         .target = target,
@@ -35,28 +36,25 @@ pub fn build(b: *std.Build) void {
         .file = .{ .path = "c-impl/pure.c" },
         .flags = &.{"-std=c89"},
     });
-    pure_c.linkLibrary(libz);
-    b.installArtifact(pure_c);
+    pure_c.linkLibrary(zlib.artifact("z"));
 
-    const regress_exe = b.addExecutable(.{
-        .name = "pure",
-        .root_source_file = .{ .path = "src/regress.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
+    // regression tests use libzip's regression testing data
     var libzip = b.dependency("libzip", .{});
     var regress_opts = b.addOptions();
     regress_opts.addOptionPath("regression_zip_dir", libzip.path("regress"));
-    regress_exe.linkLibrary(libz);
-    regress_exe.linkLibrary(pure_c);
-    regress_exe.root_module.addOptions("regress", regress_opts);
-    b.installArtifact(regress_exe);
 
-    const run_cmd = b.addRunArtifact(regress_exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args|
-        run_cmd.addArgs(args);
+    // test suite
+    const tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/root.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    tests.linkLibrary(zlib.artifact("z"));
+    tests.linkLibrary(pure_c);
+    tests.root_module.addOptions("regress", regress_opts);
 
-    const regress_step = b.step("regress", "Run the regression test against C version");
-    regress_step.dependOn(&run_cmd.step);
+    const run_unit_tests = b.addRunArtifact(tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
 }
